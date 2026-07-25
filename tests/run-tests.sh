@@ -305,11 +305,13 @@ ok "configured profile bundle resolution"
 
 bundle="$TEST_TMP/full-example.machstrap"
 "$REPO_ROOT/machstrap" bundle full-example --out "$bundle"
-tar -tzf "$bundle" | grep -q '^machstrap/MANIFEST.sha256$' || fail "bundle manifest missing"
+tar -tzf "$bundle" >"$TEST_TMP/bundle-list"
+grep -q '^machstrap/MANIFEST.sha256$' "$TEST_TMP/bundle-list" ||
+    fail "bundle manifest missing"
 tar -xOf "$bundle" machstrap/VERSION >"$TEST_TMP/bundle-version"
 cmp "$REPO_ROOT/VERSION" "$TEST_TMP/bundle-version" ||
     fail "bundle version does not match source"
-if tar -tzf "$bundle" | grep -Eq 'inventories|vault'; then
+if grep -Eq 'inventories|vault' "$TEST_TMP/bundle-list"; then
     fail "bundle contains inventory or Vault material"
 fi
 ok "bundle excludes inventory and includes manifest"
