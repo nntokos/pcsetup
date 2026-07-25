@@ -1,0 +1,16 @@
+.DS_Store
+.idea/
+
+*.machstrap
+.vault-pass*
+*.vault-password
+vault-password-file
+tests/sim/lima/images/
+
+# Ignore dev, test, local and output directories
+_local/
+.untracked/
+
+# AI
+.claude/
+/AGENTS.md

@@ -1,0 +1,30 @@
+---
+# Safe Linux workstation starting point.
+machstrap_profile:
+  hostname:
+    hostname: machstrap-linux-workstation
+  packages:
+    apt: [git, curl, ca-certificates, ripgrep, tmux, vim]
+    snap: []
+    brew: []
+    cask: []
+    pip: []
+  git_config:
+    init.defaultBranch: main
+  git_repos: []
+  dotfiles:
+    - path: ~/.profile
+      mode: append
+      block: local-bin
+      lines: ['export PATH="$HOME/.local/bin:$PATH"']
+  dotfile_sources: []
+  folder_sources: []
+  dotfiles_repo: {}
+  github_ssh: {enabled: false, email: "", key_type: ed25519}
+  ssh: {enabled: false, authorized_keys: [], allow_password: false, port: 22}
+  macos: {defaults: [], restart: []}
+  commands: []
+  static_network: {enabled: false}
+  firewall: {configured: false}
+  wireguard: {enabled: false}
+  plex: {enabled: false}

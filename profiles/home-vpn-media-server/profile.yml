@@ -1,0 +1,61 @@
+---
+# Ubuntu/Debian home VPN and Plex example. Review addresses, firewall exposure,
+# media ownership, and peers before applying. Keep Plex claim tokens in Vault.
+machstrap_profile:
+  hostname: {hostname: home-server}
+  packages:
+    apt: [git, curl, ca-certificates]
+    snap: []
+    brew: []
+    cask: []
+    pip: []
+  git_config: {}
+  git_repos: []
+  dotfiles: []
+  dotfile_sources: []
+  folder_sources: []
+  dotfiles_repo: {}
+  github_ssh: {enabled: false, email: "", key_type: ed25519}
+  ssh:
+    enabled: false
+    authorized_keys: []
+    allow_password: false
+    port: 22
+  macos: {defaults: [], restart: []}
+  commands: []
+  static_network:
+    enabled: false
+    address: 192.168.1.100/24
+    only_on_subnet: 192.168.1.0/24
+    interface: auto
+    gateway: auto
+    dns: [1.1.1.1, 9.9.9.9]
+    apply: true
+  firewall:
+    configured: true
+    enabled: true
+    default_incoming: deny
+    default_outgoing: allow
+    rules:
+      - {port: 22, protocol: tcp, from: 192.168.1.0/24, comment: LAN SSH}
+      - {port: 51820, protocol: udp, from: any, comment: WireGuard}
+      - {port: 32400, protocol: tcp, from: 192.168.1.0/24, comment: LAN Plex}
+  wireguard:
+    enabled: true
+    interface: wg0
+    address: 10.8.0.1/24
+    listen_port: 51820
+    private_key_path: /etc/wireguard/server.key
+    outbound_interface: auto
+    peers: []
+  plex:
+    enabled: true
+    image: lscr.io/linuxserver/plex:latest
+    config_path: /srv/plex/config
+    transcode_path: /srv/plex/transcode
+    media_paths: [/srv/media]
+    timezone: UTC
+    uid: 1000
+    gid: 1000
+    claim: ""
+    update_image: false

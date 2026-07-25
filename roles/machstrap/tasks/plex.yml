@@ -1,0 +1,93 @@
+---
+- name: Define Plex values
+  ansible.builtin.set_fact:
+    plex_image: "{{ machstrap.plex.image | default('lscr.io/linuxserver/plex:latest') }}"
+
+- name: Require Linux for Plex
+  ansible.builtin.assert:
+    that: machstrap_is_linux
+    fail_msg: The Plex container currently supports Linux with Docker.
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name: docker.io
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Enable Docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+  become: true
+  when: not ansible_check_mode
+
+- name: Create Plex storage directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ machstrap.plex.uid | default(1000) }}"
+    group: "{{ machstrap.plex.gid | default(1000) }}"
+    mode: "0755"
+  loop: >-
+    {{
+      [machstrap.plex.config_path | default('/srv/plex/config'),
+       machstrap.plex.transcode_path | default('/srv/plex/transcode')]
+      + machstrap.plex.media_paths
+    }}
+  become: true
+
+- name: Write the private Plex environment
+  ansible.builtin.copy:
+    dest: /etc/machstrap-plex.env
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      PUID={{ machstrap.plex.uid | default(1000) }}
+      PGID={{ machstrap.plex.gid | default(1000) }}
+      TZ={{ machstrap.plex.timezone | default('UTC') }}
+      VERSION=docker
+      PLEX_CLAIM={{ machstrap.plex.claim | default('') }}
+  no_log: true
+  become: true
+  notify: Restart Plex
+
+- name: Check for the Plex image
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ plex_image }}"]
+  register: machstrap_plex_image
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+
+- name: Pull the configured Plex image
+  ansible.builtin.command:
+    argv: [docker, pull, "{{ plex_image }}"]
+  become: true
+  when:
+    - not ansible_check_mode
+    - machstrap_plex_image.rc != 0 or machstrap.plex.update_image | default(false) | bool
+  notify: Restart Plex
+
+- name: Install the Plex systemd unit
+  ansible.builtin.template:
+    src: plex.service.j2
+    dest: /etc/systemd/system/machstrap-plex.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Restart Plex
+
+- name: Enable Plex
+  ansible.builtin.systemd:
+    name: machstrap-plex
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  when: not ansible_check_mode

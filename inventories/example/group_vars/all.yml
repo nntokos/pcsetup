@@ -1,0 +1,10 @@
+---
+# Shared non-secret overrides. These values are merged recursively after the
+# selected profile; lists replace the profile list rather than appending.
+machstrap_overrides: {}
+  # git_config:
+  #   user.name: Your Name
+  #   user.email: you@example.com
+
+# Secret overrides belong in an encrypted vault.yml beside this file. The
+# unencrypted template is vault.example.yml.

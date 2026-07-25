@@ -1,0 +1,1094 @@
+#!/usr/bin/env bash
+#
+# machstrap — a small, security-conscious launcher for the Ansible project.
+#
+# machstrap contains no Python implementation and creates no virtualenv. It
+# expects ansible-core to be installed independently on the controller.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+if [[ -f "$SCRIPT_DIR/playbooks/site.yml" ]]; then
+    RUNTIME_ROOT="$SCRIPT_DIR"
+elif [[ -f "$SCRIPT_DIR/../share/machstrap/playbooks/site.yml" ]]; then
+    RUNTIME_ROOT="$(cd "$SCRIPT_DIR/../share/machstrap" && pwd -P)"
+else
+    RUNTIME_ROOT="$SCRIPT_DIR"
+fi
+ACTIVE_TMP=""
+ANSIBLE_TMP_OWNED=""
+REPORT_TMP=""
+MIN_ANSIBLE_MAJOR=2
+MIN_ANSIBLE_MINOR=16
+BUNDLE_MAX_FILES=1000
+BUNDLE_MAX_FILE_KIB=20480
+BUNDLE_MAX_TOTAL_KIB=102400
+COLOR_GREEN=$'\033[1;32m'
+COLOR_RED=$'\033[1;31m'
+COLOR_RESET=$'\033[0m'
+CONFIGURED_PROFILE_ROOT=""
+MACHSTRAP_CONFIG_STATE=missing
+
+cleanup() {
+    if [[ -n "$ACTIVE_TMP" && -d "$ACTIVE_TMP" ]]; then
+        rm -rf -- "$ACTIVE_TMP"
+    fi
+    if [[ -n "$ANSIBLE_TMP_OWNED" && -d "$ANSIBLE_TMP_OWNED" ]]; then
+        rm -rf -- "$ANSIBLE_TMP_OWNED"
+    fi
+    if [[ -n "$REPORT_TMP" && -f "$REPORT_TMP" ]]; then
+        rm -f -- "$REPORT_TMP"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+color_enabled() {
+    local descriptor="$1"
+    [[ -z "${NO_COLOR:-}" ]] || return 1
+    [[ "${MACHSTRAP_COLOR:-auto}" == always ]] && return 0
+    [[ "${MACHSTRAP_COLOR:-auto}" != never && -t "$descriptor" ]]
+}
+
+err()  {
+    if color_enabled 2; then
+        printf '%smachstrap: error: %s%s\n' "$COLOR_RED" "$*" "$COLOR_RESET" >&2
+    else
+        printf 'machstrap: error: %s\n' "$*" >&2
+    fi
+}
+warn() { printf 'machstrap: warning: %s\n' "$*" >&2; }
+info() { printf 'machstrap: %s\n' "$*" >&2; }
+
+doctor_ok() {
+    if color_enabled 1; then
+        printf '  [%sok%s] %s\n' "$COLOR_GREEN" "$COLOR_RESET" "$*"
+    else
+        printf '  [ok] %s\n' "$*"
+    fi
+}
+
+doctor_failure() {
+    local label="$1"
+    shift
+    if color_enabled 1; then
+        printf '  [%s%s%s] %s\n' "$COLOR_RED" "$label" "$COLOR_RESET" "$*"
+    else
+        printf '  [%s] %s\n' "$label" "$*"
+    fi
+}
+
+doctor_ready() {
+    if color_enabled 1; then
+        printf '  %sReady.%s\n' "$COLOR_GREEN" "$COLOR_RESET"
+    else
+        printf '  Ready.\n'
+    fi
+}
+
+render_run_report() {
+    local log="$1" exit_code="$2" mode="$3" profile="$4" target="$5" elapsed="$6"
+    local result=SUCCESS
+    (( exit_code == 0 )) || result=FAILED
+
+    printf '\n'
+    if [[ "$result" == SUCCESS ]]; then
+        if color_enabled 1; then
+            printf '%sMACHSTRAP REPORT — %s%s\n' "$COLOR_GREEN" "$result" "$COLOR_RESET"
+        else
+            printf 'MACHSTRAP REPORT — %s\n' "$result"
+        fi
+    else
+        if color_enabled 1; then
+            printf '%sMACHSTRAP REPORT — %s%s\n' "$COLOR_RED" "$result" "$COLOR_RESET"
+        else
+            printf 'MACHSTRAP REPORT — %s\n' "$result"
+        fi
+    fi
+    printf '  Mode:     %s\n' "$mode"
+    printf '  Profile:  %s\n' "$profile"
+    printf '  Target:   %s\n' "$target"
+    printf '  Duration: %ss\n' "$elapsed"
+
+    awk '
+        function remember(status, host, task, key) {
+            key = status SUBSEP host SUBSEP task
+            if (!(key in counts)) {
+                order[++total] = key
+                statuses[key] = status
+                hosts[key] = host
+                tasks[key] = task
+            }
+            counts[key]++
+            totals[status]++
+        }
+        function bracket_host(line, start, rest, finish) {
+            start = index(line, "[")
+            if (!start) return "unknown"
+            rest = substr(line, start + 1)
+            finish = index(rest, "]")
+            if (!finish) return "unknown"
+            return substr(rest, 1, finish - 1)
+        }
+        /^TASK \[/ {
+            current = $0
+            sub(/^TASK \[/, "", current)
+            sub(/\][* ]*$/, "", current)
+            next
+        }
+        /^changed: \[/    { remember("CHANGED", bracket_host($0), current); next }
+        /^ok: \[/         { remember("OK", bracket_host($0), current); next }
+        /^skipping: \[/   { remember("SKIPPED", bracket_host($0), current); next }
+        /^fatal: \[/ {
+            status = index($0, "UNREACHABLE!") ? "UNREACHABLE" : "FAILED"
+            remember(status, bracket_host($0), current)
+            next
+        }
+        /^included: / {
+            host = $0
+            sub(/^.* for /, "", host)
+            sub(/ =>.*$/, "", host)
+            remember("INCLUDED", host, current)
+            next
+        }
+        /^rescued: \[/    { remember("RESCUED", bracket_host($0), current); next }
+        /^ignored: \[/    { remember("IGNORED", bracket_host($0), current); next }
+        /^[^ ]+[ ]+:[ ]+ok=/ {
+            recap_seen = 1
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^(ok|changed|unreachable|failed|skipped|rescued|ignored)=/) {
+                    split($i, pair, "=")
+                    recap[pair[1]] += pair[2]
+                }
+            }
+            next
+        }
+        END {
+            split("CHANGED FAILED UNREACHABLE OK INCLUDED SKIPPED RESCUED IGNORED", wanted, " ")
+            any = 0
+            for (w = 1; w <= 8; w++) {
+                status = wanted[w]
+                hidden = 0
+                if (status == "SKIPPED" && recap_seen && recap["skipped"] > totals[status]) {
+                    hidden = recap["skipped"] - totals[status]
+                }
+                if (!totals[status] && !hidden) continue
+                any = 1
+                printf "\n  %s (%d)\n", status, totals[status] + hidden
+                for (i = 1; i <= total; i++) {
+                    key = order[i]
+                    if (statuses[key] != status) continue
+                    suffix = counts[key] > 1 ? " (" counts[key] " results)" : ""
+                    printf "    %s — %s%s\n", hosts[key], tasks[key], suffix
+                }
+                if (hidden) {
+                    printf "    %d results suppressed by Ansible compact output\n", hidden
+                }
+            }
+            if (!any) {
+                printf "\n  No Ansible task results were emitted.\n"
+            }
+            changed_total = recap_seen ? recap["changed"] : totals["CHANGED"]
+            ok_total = recap_seen ? recap["ok"] : totals["OK"]
+            skipped_total = recap_seen ? recap["skipped"] : totals["SKIPPED"]
+            failed_total = recap_seen ? recap["failed"] : totals["FAILED"]
+            unreachable_total = recap_seen ? recap["unreachable"] : totals["UNREACHABLE"]
+            rescued_total = recap_seen ? recap["rescued"] : totals["RESCUED"]
+            ignored_total = recap_seen ? recap["ignored"] : totals["IGNORED"]
+            printf "\n  TOTAL: %d changed · %d ok · %d included · %d skipped · %d failed · %d unreachable · %d rescued · %d ignored\n",
+                changed_total + 0, ok_total + 0,
+                totals["INCLUDED"] + 0, skipped_total + 0,
+                failed_total + 0, unreachable_total + 0,
+                rescued_total + 0, ignored_total + 0
+        }
+    ' "$log"
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  machstrap --version
+  machstrap doctor
+  machstrap config [PATH|--unset]
+  machstrap profiles list
+  machstrap profiles default
+  machstrap init DEST [--preset PRESET] [--force]
+  machstrap check PROFILE [target options]
+  machstrap apply PROFILE|FILE.machstrap [target options]
+  machstrap bundle PROFILE --out FILE.machstrap [--force]
+
+Commands:
+  --version                           Print the installed Machstrap version
+  doctor                              Check controller prerequisites
+  config                              Set, show, or unset the optional profile directory
+  profiles list                       List profiles from the configured directory
+  profiles default                    List profiles shipped with machstrap
+  init                                Init a new profile
+  check                               Validate a profile without changing targets
+  apply                               Apply or dry-run a profile
+  bundle                              Build a portable profile archive
+
+Target modes:
+  --local, --here                    Apply to this machine
+  --inventory PATH --limit PATTERN  Apply selected inventory hosts
+  --inventory PATH --all            Explicitly apply every inventory host
+  --host HOST [SSH options]          Apply to one ad-hoc SSH host
+
+SSH options (only with --host):
+  --user USER
+  --port PORT
+  --identity PATH
+  --ssh-config PATH
+
+Execution options:
+  --dry-run, --check                 Preview without applying changes
+  --diff
+  --ask-become-pass
+  --ask-vault-pass
+  --vault-password-file PATH
+  --tags TAGS
+  --skip-tags TAGS
+  -v, -vv, -vvv, -vvvv
+
+PROFILE is either a directory containing profile.yml, a profile.yml path, or
+a bare name from the optional configured directory or this runtime's bundled
+profiles/ directory.
+EOF
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+version_command() {
+    local version_file="$RUNTIME_ROOT/VERSION" version line_count
+    [[ -f "$version_file" && ! -L "$version_file" ]] || {
+        err "runtime version file is missing"
+        return 1
+    }
+    line_count="$(awk 'END {print NR + 0}' "$version_file")"
+    IFS= read -r version < "$version_file" || true
+    [[ "$line_count" == 1 && "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+        err "runtime version file is invalid"
+        return 1
+    }
+    printf 'machstrap %s\n' "$version"
+}
+
+canonical_file() {
+    local path="$1" directory base
+    [[ -f "$path" ]] || return 1
+    directory="$(cd "$(dirname "$path")" && pwd -P)"
+    base="$(basename "$path")"
+    printf '%s/%s\n' "$directory" "$base"
+}
+
+canonical_directory() {
+    local path="$1"
+    [[ -d "$path" ]] || return 1
+    (cd "$path" && pwd -P)
+}
+
+path_identity() {
+    local path="$1"
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        Darwin|FreeBSD|OpenBSD|NetBSD)
+            stat -f '%u %Lp' "$path" 2>/dev/null
+            ;;
+        *)
+            stat -c '%u %a' "$path" 2>/dev/null
+            ;;
+    esac
+}
+
+config_locations() {
+    local base
+    if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+        base="$XDG_CONFIG_HOME"
+    elif [[ -n "${HOME:-}" ]]; then
+        base="$HOME/.config"
+    else
+        return 1
+    fi
+    [[ "$base" == /* ]] || return 1
+    MACHSTRAP_CONFIG_DIR="${base%/}/machstrap"
+    MACHSTRAP_CONFIG_FILE="$MACHSTRAP_CONFIG_DIR/config"
+}
+
+secure_owned_config_path() {
+    local path="$1" kind="$2" expected_mode="$3" identity uid mode
+    [[ ! -L "$path" ]] || return 1
+    if [[ "$kind" == directory ]]; then
+        [[ -d "$path" ]] || return 1
+    else
+        [[ -f "$path" ]] || return 1
+    fi
+    identity="$(path_identity "$path")" || return 1
+    uid="${identity%% *}"
+    mode="${identity#* }"
+    [[ "$uid" == "$(id -u)" && "$mode" == "$expected_mode" ]]
+}
+
+path_not_group_world_writable() {
+    local path="$1" identity mode group_digit other_digit
+    identity="$(path_identity "$path")" || return 1
+    mode="${identity#* }"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    group_digit="${mode: -2:1}"
+    other_digit="${mode: -1}"
+    [[ "$group_digit" != 2 && "$group_digit" != 3 &&
+       "$group_digit" != 6 && "$group_digit" != 7 &&
+       "$other_digit" != 2 && "$other_digit" != 3 &&
+       "$other_digit" != 6 && "$other_digit" != 7 ]]
+}
+
+profile_root_safe() {
+    local root="$1"
+    [[ -d "$root" && ! -L "$root" && -r "$root" && -x "$root" ]] || return 1
+    path_not_group_world_writable "$root"
+}
+
+profile_file_safe() {
+    local file="$1"
+    [[ -f "$file" && ! -L "$file" && -r "$file" ]] || return 1
+    path_not_group_world_writable "$file"
+}
+
+load_configured_profile_root() {
+    local root line_count canonical
+    CONFIGURED_PROFILE_ROOT=""
+    MACHSTRAP_CONFIG_STATE=missing
+    config_locations || {
+        MACHSTRAP_CONFIG_STATE=invalid
+        warn "ignoring profile config: HOME/XDG_CONFIG_HOME does not resolve to an absolute path"
+        return 2
+    }
+    [[ -e "$MACHSTRAP_CONFIG_FILE" || -L "$MACHSTRAP_CONFIG_FILE" ]] || return 1
+    MACHSTRAP_CONFIG_STATE=invalid
+    secure_owned_config_path "$MACHSTRAP_CONFIG_DIR" directory 700 || {
+        warn "ignoring unsafe profile config directory: $MACHSTRAP_CONFIG_DIR"
+        return 2
+    }
+    secure_owned_config_path "$MACHSTRAP_CONFIG_FILE" file 600 || {
+        warn "ignoring unsafe profile config file: $MACHSTRAP_CONFIG_FILE"
+        return 2
+    }
+    line_count="$(awk 'END {print NR + 0}' "$MACHSTRAP_CONFIG_FILE")"
+    [[ "$line_count" == 1 ]] || {
+        warn "ignoring malformed profile config: expected one path"
+        return 2
+    }
+    IFS= read -r root < "$MACHSTRAP_CONFIG_FILE" || true
+    [[ -n "$root" && "$root" == /* ]] || {
+        warn "ignoring malformed profile config: path must be absolute"
+        return 2
+    }
+    contains_control_characters "$root" && {
+        warn "ignoring malformed profile config: path contains control characters"
+        return 2
+    }
+    canonical="$(canonical_directory "$root")" || {
+        warn "ignoring stale profile config: directory not found: $root"
+        return 2
+    }
+    profile_root_safe "$canonical" || {
+        warn "ignoring unsafe profile directory: $canonical"
+        return 2
+    }
+    CONFIGURED_PROFILE_ROOT="$canonical"
+    MACHSTRAP_CONFIG_STATE=loaded
+}
+
+configured_profile_candidate() {
+    local name="$1" candidate
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    load_configured_profile_root >/dev/null || true
+    [[ -n "$CONFIGURED_PROFILE_ROOT" ]] || return 1
+    candidate="$CONFIGURED_PROFILE_ROOT/$name"
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+        if profile_root_safe "$candidate" &&
+           profile_file_safe "$candidate/profile.yml"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        warn "ignoring unsafe configured profile: $candidate"
+    fi
+    return 1
+}
+
+sha256_tool() {
+    if command_exists sha256sum; then
+        printf '%s\n' sha256sum
+    elif command_exists shasum; then
+        printf '%s\n' 'shasum -a 256'
+    else
+        return 1
+    fi
+}
+
+sha256_file() {
+    local file="$1"
+    if command_exists sha256sum; then
+        sha256sum "$file" | awk '{print $1}'
+    else
+        shasum -a 256 "$file" | awk '{print $1}'
+    fi
+}
+
+ansible_version_ok() {
+    local version major minor local_temp remove_temp=false
+    if [[ -n "${ANSIBLE_LOCAL_TEMP:-}" ]]; then
+        local_temp="$ANSIBLE_LOCAL_TEMP"
+    else
+        local_temp="$(mktemp -d "${TMPDIR:-/tmp}/machstrap-version.XXXXXX")"
+        chmod 700 "$local_temp"
+        remove_temp=true
+    fi
+    version="$(ANSIBLE_LOCAL_TEMP="$local_temp" ansible-playbook --version 2>/dev/null | awk 'NR == 1 {gsub(/[][]/, "", $3); print $3}')"
+    [[ "$remove_temp" == false ]] || rm -rf -- "$local_temp"
+    major="${version%%.*}"
+    minor="${version#*.}"
+    minor="${minor%%.*}"
+    [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+    (( major > MIN_ANSIBLE_MAJOR || (major == MIN_ANSIBLE_MAJOR && minor >= MIN_ANSIBLE_MINOR) ))
+}
+
+doctor_install_guidance() {
+    local system distro=""
+    system="$(uname -s 2>/dev/null || printf unknown)"
+    if [[ "$system" == Linux && -r /etc/os-release ]]; then
+        distro="$(sed -n 's/^ID=//p' /etc/os-release | head -n 1 | tr -d '"')"
+    fi
+
+    printf '\nInstall Ansible with your operating system'\''s trusted package manager, then\n'
+    printf 'run `machstrap doctor` again.\n'
+    case "$system:$distro" in
+        Darwin:*)
+            printf '  macOS/Homebrew:  brew install ansible\n'
+            ;;
+        Linux:debian|Linux:ubuntu|Linux:linuxmint|Linux:pop)
+            printf '  Debian family:   sudo apt install ansible-core\n'
+            ;;
+        Linux:fedora|Linux:rhel|Linux:centos|Linux:rocky|Linux:almalinux)
+            printf '  Red Hat family:  sudo dnf install ansible-core\n'
+            ;;
+        Linux:arch|Linux:manjaro)
+            printf '  Arch family:     sudo pacman -S ansible-core\n'
+            ;;
+        Linux:alpine)
+            printf '  Alpine:          sudo apk add ansible-core bash openssh-client tar\n'
+            ;;
+        Linux:opensuse*|Linux:sles)
+            printf '  SUSE family:     sudo zypper install ansible\n'
+            ;;
+        FreeBSD:*|OpenBSD:*|NetBSD:*)
+            printf '  BSD:             use pkg/pkg_add to install Ansible, Bash, and OpenSSH\n'
+            ;;
+        *)
+            printf '  See: https://docs.ansible.com/ansible/latest/installation_guide/\n'
+            ;;
+    esac
+    printf '\nmachstrap never installs packages or creates a Python environment itself.\n'
+}
+
+doctor() {
+    local failed=0
+    printf 'machstrap doctor\n'
+    if [[ -n "${BASH_VERSION:-}" ]]; then
+        doctor_ok "Bash $BASH_VERSION"
+    else
+        doctor_failure missing Bash
+        failed=1
+    fi
+    for tool in ansible-playbook ssh tar; do
+        if command_exists "$tool"; then
+            doctor_ok "$tool: $(command -v "$tool")"
+        else
+            doctor_failure missing "$tool"
+            failed=1
+        fi
+    done
+    if command_exists ansible-playbook && ! ansible_version_ok; then
+        doctor_failure unsupported "ansible-core $MIN_ANSIBLE_MAJOR.$MIN_ANSIBLE_MINOR or newer is required"
+        failed=1
+    fi
+    if sha256_tool >/dev/null; then
+        doctor_ok "SHA-256 utility"
+    else
+        doctor_failure missing "sha256sum or shasum"
+        failed=1
+    fi
+    if (( failed != 0 )); then
+        doctor_install_guidance
+        return 1
+    fi
+    doctor_ready
+}
+
+require_runtime() {
+    command_exists ansible-playbook || {
+        err "ansible-playbook was not found; run 'machstrap doctor'"
+        return 1
+    }
+    ansible_version_ok || {
+        err "ansible-core $MIN_ANSIBLE_MAJOR.$MIN_ANSIBLE_MINOR or newer is required"
+        return 1
+    }
+}
+
+resolve_profile() {
+    local value="$1" candidate root configured
+    if [[ -d "$value" ]]; then
+        candidate="$value/profile.yml"
+    elif [[ -f "$value" ]]; then
+        candidate="$value"
+    elif [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        configured="$(configured_profile_candidate "$value")" || configured=""
+        if [[ -n "$configured" ]]; then
+            candidate="$configured/profile.yml"
+        elif [[ -f "$RUNTIME_ROOT/profiles/$value/profile.yml" ]]; then
+            candidate="$RUNTIME_ROOT/profiles/$value/profile.yml"
+        else
+            err "profile not found: $value"
+            return 1
+        fi
+    else
+        err "profile not found: $value"
+        return 1
+    fi
+    candidate="$(canonical_file "$candidate")" || {
+        err "profile.yml not found: $candidate"
+        return 1
+    }
+    [[ "$(basename "$candidate")" == "profile.yml" ]] || {
+        err "a profile file must be named profile.yml: $candidate"
+        return 1
+    }
+    root="$(canonical_directory "$(dirname "$candidate")")"
+    [[ ! -L "$candidate" ]] || {
+        err "profile.yml must not be a symbolic link"
+        return 1
+    }
+    MACHSTRAP_PROFILE_FILE="$candidate"
+    MACHSTRAP_PROFILE_ROOT="$root"
+    export MACHSTRAP_PROFILE_FILE MACHSTRAP_PROFILE_ROOT
+}
+
+contains_control_characters() {
+    local value="$1"
+    [[ "$value" == *$'\n'* || "$value" == *$'\r'* || "$value" == *$'\t'* ]]
+}
+
+validate_host() {
+    local host="$1"
+    [[ -n "$host" && "$host" != -* ]] || return 1
+    contains_control_characters "$host" && return 1
+    [[ "$host" != *" "* && "$host" != *","* && "$host" != *"'"* && "$host" != *'"'* ]]
+}
+
+validate_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+config_set_profile_root() {
+    local requested="$1" canonical old_umask temp
+    contains_control_characters "$requested" && {
+        err "profile directory contains control characters"
+        return 2
+    }
+    canonical="$(canonical_directory "$requested")" || {
+        err "profile directory not found: $requested"
+        return 1
+    }
+    profile_root_safe "$canonical" || {
+        err "profile directory must be readable, searchable, and not group/world writable: $canonical"
+        return 1
+    }
+    config_locations || {
+        err "HOME or XDG_CONFIG_HOME must resolve to an absolute path"
+        return 1
+    }
+
+    old_umask="$(umask)"
+    umask 077
+    mkdir -p "$MACHSTRAP_CONFIG_DIR" || {
+        umask "$old_umask"
+        err "could not create config directory: $MACHSTRAP_CONFIG_DIR"
+        return 1
+    }
+    umask "$old_umask"
+    secure_owned_config_path "$MACHSTRAP_CONFIG_DIR" directory 700 || {
+        err "config directory must be user-owned, mode 0700, and not a symlink: $MACHSTRAP_CONFIG_DIR"
+        return 1
+    }
+    if [[ -e "$MACHSTRAP_CONFIG_FILE" || -L "$MACHSTRAP_CONFIG_FILE" ]]; then
+        secure_owned_config_path "$MACHSTRAP_CONFIG_FILE" file 600 || {
+            err "refusing to replace unsafe config file: $MACHSTRAP_CONFIG_FILE"
+            return 1
+        }
+    fi
+
+    temp="$MACHSTRAP_CONFIG_DIR/.config.$$"
+    [[ ! -e "$temp" && ! -L "$temp" ]] || {
+        err "temporary config path already exists: $temp"
+        return 1
+    }
+    if ! (umask 077; printf '%s\n' "$canonical" > "$temp"); then
+        rm -f -- "$temp"
+        err "could not write temporary config file"
+        return 1
+    fi
+    if ! mv -f -- "$temp" "$MACHSTRAP_CONFIG_FILE"; then
+        rm -f -- "$temp"
+        err "could not install config file"
+        return 1
+    fi
+    printf '%s\n' "$canonical"
+}
+
+config_unset_profile_root() {
+    config_locations || {
+        err "HOME or XDG_CONFIG_HOME must resolve to an absolute path"
+        return 1
+    }
+    [[ -e "$MACHSTRAP_CONFIG_FILE" || -L "$MACHSTRAP_CONFIG_FILE" ]] || return 0
+    secure_owned_config_path "$MACHSTRAP_CONFIG_DIR" directory 700 || {
+        err "refusing to use unsafe config directory: $MACHSTRAP_CONFIG_DIR"
+        return 1
+    }
+    secure_owned_config_path "$MACHSTRAP_CONFIG_FILE" file 600 || {
+        err "refusing to remove unsafe config file: $MACHSTRAP_CONFIG_FILE"
+        return 1
+    }
+    rm -f -- "$MACHSTRAP_CONFIG_FILE"
+}
+
+config_command() {
+    if (( $# == 0 )); then
+        if load_configured_profile_root; then
+            printf '%s\n' "$CONFIGURED_PROFILE_ROOT"
+            return 0
+        fi
+        if [[ "$MACHSTRAP_CONFIG_STATE" == missing ]]; then
+            err "no profile directory is configured"
+        else
+            err "the configured profile directory is invalid"
+        fi
+        return 1
+    fi
+    if (( $# == 1 )) && [[ "$1" == --unset ]]; then
+        config_unset_profile_root
+        return
+    fi
+    (( $# == 1 )) || {
+        err "usage: machstrap config [PATH|--unset]"
+        return 2
+    }
+    [[ "$1" != -* ]] || {
+        err "unknown config option: $1"
+        return 2
+    }
+    config_set_profile_root "$1"
+}
+
+profile_summary() {
+    local profile_file="$1"
+    awk '
+        NR == 1 && $0 == "---" { next }
+        /^[[:space:]]*$/ { next }
+        /^#[[:space:]]*/ {
+            line = $0
+            sub(/^#[[:space:]]*/, "", line)
+            if (length(line)) {
+                gsub(/[[:cntrl:]]/, " ", line)
+                print substr(line, 1, 160)
+                exit
+            }
+            next
+        }
+        { exit }
+    ' "$profile_file"
+}
+
+profile_records() {
+    local root="$1" include_overrides="$2" directory name summary suffix
+    for directory in "$root"/*; do
+        profile_root_safe "$directory" || continue
+        name="$(basename "$directory")"
+        [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
+        profile_file_safe "$directory/profile.yml" || continue
+        summary="$(profile_summary "$directory/profile.yml")"
+        [[ -n "$summary" ]] || summary="No description."
+        suffix=""
+        if [[ "$include_overrides" == true && -f "$RUNTIME_ROOT/profiles/$name/profile.yml" ]]; then
+            suffix=" [overrides default]"
+        fi
+        printf '%s\t%s%s\n' "$name" "$summary" "$suffix"
+    done | LC_ALL=C sort
+}
+
+render_profile_records() {
+    local records="$1" name summary
+    if [[ -z "$records" ]]; then
+        printf '  (none)\n'
+        return
+    fi
+    while IFS=$'\t' read -r name summary; do
+        printf '  %-28s %s\n' "$name" "$summary"
+    done <<< "$records"
+}
+
+profiles_command() {
+    local subcommand="${1:-}" records
+    (( $# == 1 )) || {
+        err "usage: machstrap profiles list|default"
+        return 2
+    }
+    case "$subcommand" in
+        list)
+            load_configured_profile_root >/dev/null || true
+            if [[ -z "$CONFIGURED_PROFILE_ROOT" ]]; then
+                printf 'No profile directory configured. Run: machstrap config PATH\n'
+                return 0
+            fi
+            records="$(profile_records "$CONFIGURED_PROFILE_ROOT" true)"
+            printf 'Configured profiles (%s):\n' "$CONFIGURED_PROFILE_ROOT"
+            render_profile_records "$records"
+            ;;
+        default)
+            records="$(profile_records "$RUNTIME_ROOT/profiles" false)"
+            printf 'Default profiles:\n'
+            render_profile_records "$records"
+            ;;
+        *)
+            err "unknown profiles command: $subcommand"
+            err "usage: machstrap profiles list|default"
+            return 2
+            ;;
+    esac
+}
+
+init_profile() {
+    local destination="" preset="full-example" force=false source configured
+    while (( $# )); do
+        case "$1" in
+            --preset) [[ $# -ge 2 ]] || { err "--preset requires a value"; return 2; }; preset="$2"; shift 2 ;;
+            --force) force=true; shift ;;
+            -*) err "unknown init option: $1"; return 2 ;;
+            *) [[ -z "$destination" ]] || { err "init accepts one destination"; return 2; }; destination="$1"; shift ;;
+        esac
+    done
+    [[ -n "$destination" ]] || { err "init requires a destination"; return 2; }
+    [[ "$preset" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+        err "invalid preset name: $preset"
+        return 2
+    }
+    configured="$(configured_profile_candidate "$preset")" || configured=""
+    if [[ -n "$configured" ]]; then
+        source="$configured"
+    else
+        source="$RUNTIME_ROOT/profiles/$preset"
+    fi
+    [[ -d "$source" && ! -L "$source" ]] || { err "unknown preset: $preset"; return 2; }
+    if [[ -e "$destination" && "$force" != true ]]; then
+        err "destination exists: $destination (use --force to replace an empty scaffold)"
+        return 1
+    fi
+    if [[ -e "$destination" && "$force" == true ]]; then
+        [[ -d "$destination" ]] || { err "destination is not a directory: $destination"; return 1; }
+        [[ -z "$(find "$destination" -mindepth 1 -print -quit)" ]] || {
+            err "--force only permits an existing empty directory"
+            return 1
+        }
+    fi
+    mkdir -p -- "$destination"
+    cp -R "$source/." "$destination/"
+    info "created profile: $destination"
+}
+
+check_profile_tree() {
+    local root="$1" count total
+    if [[ -n "$(find "$root" -type l -print -quit)" ]]; then
+        err "profiles and bundles may not contain symbolic links"
+        return 1
+    fi
+    if [[ -n "$(find "$root" -type f -size +"${BUNDLE_MAX_FILE_KIB}"k -print -quit)" ]]; then
+        err "a profile file exceeds ${BUNDLE_MAX_FILE_KIB} KiB"
+        return 1
+    fi
+    count="$(find "$root" -type f | wc -l | tr -d ' ')"
+    (( count <= BUNDLE_MAX_FILES )) || {
+        err "profile contains $count files; limit is $BUNDLE_MAX_FILES"
+        return 1
+    }
+    total="$(du -sk "$root" | awk '{print $1}')"
+    (( total <= BUNDLE_MAX_TOTAL_KIB )) || {
+        err "profile expands to ${total} KiB; limit is ${BUNDLE_MAX_TOTAL_KIB} KiB"
+        return 1
+    }
+    if find "$root" -print | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        err "profile paths may not contain control characters"
+        return 1
+    fi
+}
+
+write_manifest() {
+    local root="$1" manifest relative hash
+    manifest="$root/MANIFEST.sha256"
+    : > "$manifest"
+    while IFS= read -r relative; do
+        [[ "$relative" == "./MANIFEST.sha256" ]] && continue
+        hash="$(sha256_file "$root/${relative#./}")"
+        printf '%s  %s\n' "$hash" "${relative#./}" >> "$manifest"
+    done < <(cd "$root" && find . -type f | LC_ALL=C sort)
+}
+
+bundle_create() {
+    local profile="" output="" force=false staging bundle_root
+    while (( $# )); do
+        case "$1" in
+            --out|-o) [[ $# -ge 2 ]] || { err "--out requires a value"; return 2; }; output="$2"; shift 2 ;;
+            --force) force=true; shift ;;
+            -*) err "unknown bundle option: $1"; return 2 ;;
+            *) [[ -z "$profile" ]] || { err "bundle accepts one profile"; return 2; }; profile="$1"; shift ;;
+        esac
+    done
+    [[ -n "$profile" && -n "$output" ]] || { err "bundle requires PROFILE and --out FILE.machstrap"; return 2; }
+    [[ "$output" == *.machstrap ]] || { err "bundle output must end in .machstrap"; return 2; }
+    [[ ! -e "$output" || "$force" == true ]] || { err "bundle exists: $output"; return 1; }
+    resolve_profile "$profile"
+    check_profile_tree "$MACHSTRAP_PROFILE_ROOT"
+    ACTIVE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/machstrap-bundle.XXXXXX")"
+    chmod 700 "$ACTIVE_TMP"
+    bundle_root="$ACTIVE_TMP/machstrap"
+    mkdir -p "$bundle_root/profiles/bundled"
+    cp "$RUNTIME_ROOT/machstrap" "$RUNTIME_ROOT/ansible.cfg" \
+        "$RUNTIME_ROOT/VERSION" "$bundle_root/"
+    cp -R "$RUNTIME_ROOT/config" "$RUNTIME_ROOT/playbooks" "$RUNTIME_ROOT/roles" "$bundle_root/"
+    cp -R "$MACHSTRAP_PROFILE_ROOT/." "$bundle_root/profiles/bundled/"
+    check_profile_tree "$bundle_root"
+    write_manifest "$bundle_root"
+    mkdir -p "$(dirname "$output")"
+    staging="$ACTIVE_TMP/archive.machstrap"
+    tar -czf "$staging" -C "$ACTIVE_TMP" machstrap
+    mv -f -- "$staging" "$output"
+    rm -rf -- "$ACTIVE_TMP"
+    ACTIVE_TMP=""
+    info "bundle created: $output"
+    warn "the manifest detects corruption, not malicious replacement; distribute bundles through a trusted channel"
+}
+
+safe_bundle_member() {
+    local member="$1"
+    [[ -n "$member" && "$member" != /* && "$member" != *$'\n'* && "$member" != *$'\r'* ]] || return 1
+    [[ "$member" != *\\* ]] || return 1
+    case "/$member/" in
+        */../*|*/./*) return 1 ;;
+    esac
+    [[ "$member" == machstrap || "$member" == machstrap/* ]]
+}
+
+verify_manifest() {
+    local root="$1" manifest line hash path actual listed actual_count manifest_count
+    manifest="$root/MANIFEST.sha256"
+    [[ -f "$manifest" && ! -L "$manifest" ]] || { err "bundle manifest is missing"; return 1; }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^([0-9a-f]{64})[[:space:]][[:space:]]([^[:cntrl:]]+)$ ]] || {
+            err "bundle manifest contains an invalid record"
+            return 1
+        }
+        hash="${BASH_REMATCH[1]}"
+        path="${BASH_REMATCH[2]}"
+        safe_bundle_member "machstrap/$path" || { err "unsafe manifest path: $path"; return 1; }
+        [[ -f "$root/$path" && ! -L "$root/$path" ]] || { err "manifest file missing: $path"; return 1; }
+        actual="$(sha256_file "$root/$path")"
+        [[ "$actual" == "$hash" ]] || { err "bundle hash mismatch: $path"; return 1; }
+    done < "$manifest"
+    listed="$(awk '{sub(/^[0-9a-f]+  /, ""); print}' "$manifest" | LC_ALL=C sort)"
+    actual="$(cd "$root" && find . -type f ! -name MANIFEST.sha256 | sed 's#^./##' | LC_ALL=C sort)"
+    [[ "$listed" == "$actual" ]] || { err "bundle manifest does not exactly cover its files"; return 1; }
+    actual_count="$(printf '%s\n' "$actual" | awk 'NF {count++} END {print count+0}')"
+    manifest_count="$(wc -l < "$manifest" | tr -d ' ')"
+    [[ "$actual_count" == "$manifest_count" ]] || { err "bundle manifest file count mismatch"; return 1; }
+}
+
+extract_bundle() {
+    local archive="$1" member listing
+    archive="$(canonical_file "$archive")" || { err "bundle not found: $archive"; return 1; }
+    ACTIVE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/machstrap-apply.XXXXXX")"
+    chmod 700 "$ACTIVE_TMP"
+    listing="$ACTIVE_TMP/members"
+    tar -tzf "$archive" > "$listing" || { err "could not list bundle"; return 1; }
+    if LC_ALL=C sort "$listing" | uniq -d | grep -q .; then
+        err "bundle contains duplicate archive members"
+        return 1
+    fi
+    while IFS= read -r member; do
+        safe_bundle_member "$member" || { err "unsafe bundle member: $member"; return 1; }
+    done < "$listing"
+    if tar -tvzf "$archive" | awk '$1 ~ /^[lh]/ {found=1} END {exit !found}'; then
+        err "bundle contains symbolic or hard links"
+        return 1
+    fi
+    tar -xzf "$archive" -C "$ACTIVE_TMP"
+    RUNTIME_ROOT="$ACTIVE_TMP/machstrap"
+    [[ -f "$RUNTIME_ROOT/playbooks/site.yml" && -f "$RUNTIME_ROOT/profiles/bundled/profile.yml" ]] || {
+        err "bundle runtime is incomplete"
+        return 1
+    }
+    verify_manifest "$RUNTIME_ROOT"
+    resolve_profile "$RUNTIME_ROOT/profiles/bundled"
+}
+
+run_ansible() {
+    local action="$1" profile="$2"
+    shift 2
+    local target_mode="" inventory="" limit="" all=false host="" user="" port="" identity="" ssh_config=""
+    local check=false diff=false ask_become=false ask_vault=false vault_file="" tags="" skip_tags="" verbosity=""
+    local -a command
+    local target_description mode started ansible_status
+
+    while (( $# )); do
+        case "$1" in
+            --local|--here) [[ -z "$target_mode" ]] || { err "choose only one target mode"; return 2; }; target_mode=local; shift ;;
+            --inventory|-i) [[ $# -ge 2 ]] || { err "--inventory requires a path"; return 2; }; [[ -z "$target_mode" || "$target_mode" == inventory ]] || { err "choose only one target mode"; return 2; }; target_mode=inventory; inventory="$2"; shift 2 ;;
+            --limit|-l) [[ $# -ge 2 ]] || { err "--limit requires a value"; return 2; }; limit="$2"; shift 2 ;;
+            --all) all=true; shift ;;
+            --host) [[ $# -ge 2 ]] || { err "--host requires a value"; return 2; }; [[ -z "$target_mode" ]] || { err "choose only one target mode"; return 2; }; target_mode=host; host="$2"; shift 2 ;;
+            --user|-u) [[ $# -ge 2 ]] || { err "--user requires a value"; return 2; }; user="$2"; shift 2 ;;
+            --port|-p) [[ $# -ge 2 ]] || { err "--port requires a value"; return 2; }; port="$2"; shift 2 ;;
+            --identity) [[ $# -ge 2 ]] || { err "--identity requires a path"; return 2; }; identity="$2"; shift 2 ;;
+            --ssh-config) [[ $# -ge 2 ]] || { err "--ssh-config requires a path"; return 2; }; ssh_config="$2"; shift 2 ;;
+            --dry-run|--check) check=true; shift ;;
+            --diff) diff=true; shift ;;
+            --ask-become-pass|-K) ask_become=true; shift ;;
+            --ask-vault-pass) ask_vault=true; shift ;;
+            --vault-password-file) [[ $# -ge 2 ]] || { err "--vault-password-file requires a path"; return 2; }; vault_file="$2"; shift 2 ;;
+            --tags) [[ $# -ge 2 ]] || { err "--tags requires a value"; return 2; }; tags="$2"; shift 2 ;;
+            --skip-tags) [[ $# -ge 2 ]] || { err "--skip-tags requires a value"; return 2; }; skip_tags="$2"; shift 2 ;;
+            -v|-vv|-vvv|-vvvv) verbosity="$1"; shift ;;
+            *) err "unknown apply/check option: $1"; return 2 ;;
+        esac
+    done
+
+    [[ -n "$target_mode" ]] || { err "choose --local, --inventory, or --host"; return 2; }
+    [[ "$all" != true || "$target_mode" == inventory ]] || { err "--all requires --inventory"; return 2; }
+    [[ -z "$limit" || "$target_mode" == inventory ]] || { err "--limit requires --inventory"; return 2; }
+    if [[ "$target_mode" == inventory && -z "$limit" && "$all" != true ]]; then
+        err "inventory runs require --limit or explicit --all"
+        return 2
+    fi
+    if [[ "$target_mode" != host && ( -n "$user" || -n "$port" || -n "$identity" || -n "$ssh_config" ) ]]; then
+        err "SSH options are accepted only with --host; put inventory SSH settings in host_vars"
+        return 2
+    fi
+
+    if [[ "$profile" == *.machstrap ]]; then
+        extract_bundle "$profile"
+    else
+        resolve_profile "$profile"
+    fi
+    require_runtime
+
+    command=(ansible-playbook)
+    if [[ "$action" == check ]]; then
+        command+=("$RUNTIME_ROOT/playbooks/validate.yml")
+    else
+        command+=("$RUNTIME_ROOT/playbooks/site.yml")
+    fi
+
+    case "$target_mode" in
+        local)
+            command+=(--inventory 'localhost,' --connection local)
+            target_description=local
+            ;;
+        inventory)
+            inventory="$(canonical_file "$inventory")" || { err "inventory not found: $inventory"; return 1; }
+            command+=(--inventory "$inventory")
+            [[ -n "$limit" ]] && command+=(--limit "$limit")
+            target_description="$inventory (${limit:-all hosts})"
+            ;;
+        host)
+            validate_host "$host" || { err "invalid SSH host: $host"; return 2; }
+            command+=(--inventory "$host,")
+            if [[ -n "$user" ]]; then
+                [[ "$user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { err "invalid SSH user"; return 2; }
+                command+=(--user "$user")
+            fi
+            if [[ -n "$port" ]]; then
+                validate_port "$port" || { err "port must be between 1 and 65535"; return 2; }
+                command+=(--extra-vars "ansible_port=$port")
+            fi
+            if [[ -n "$identity" ]]; then
+                identity="$(canonical_file "$identity")" || { err "identity not found: $identity"; return 1; }
+                command+=(--private-key "$identity")
+            fi
+            if [[ -n "$ssh_config" ]]; then
+                ssh_config="$(canonical_file "$ssh_config")" || { err "SSH config not found: $ssh_config"; return 1; }
+                contains_control_characters "$ssh_config" && { err "SSH config path contains control characters"; return 2; }
+                [[ "$ssh_config" != *"'"* ]] || { err "SSH config path may not contain a single quote"; return 2; }
+                export ANSIBLE_SSH_ARGS="-F '$ssh_config'"
+            fi
+            target_description="$host"
+            [[ -z "$user" ]] || target_description="$user@$target_description"
+            [[ -z "$port" ]] || target_description="$target_description:$port"
+            ;;
+    esac
+
+    [[ "$check" == true ]] && command+=(--check)
+    [[ "$diff" == true ]] && command+=(--diff)
+    [[ "$ask_become" == true ]] && command+=(--ask-become-pass)
+    [[ "$ask_vault" == true ]] && command+=(--ask-vault-pass)
+    if [[ -n "$vault_file" ]]; then
+        vault_file="$(canonical_file "$vault_file")" || { err "vault password file not found: $vault_file"; return 1; }
+        command+=(--vault-password-file "$vault_file")
+    fi
+    [[ -n "$tags" ]] && command+=(--tags "$tags")
+    [[ -n "$skip_tags" ]] && command+=(--skip-tags "$skip_tags")
+    [[ -n "$verbosity" ]] && command+=("$verbosity")
+
+    export ANSIBLE_CONFIG="$RUNTIME_ROOT/ansible.cfg"
+    export ANSIBLE_ROLES_PATH="$RUNTIME_ROOT/roles"
+    if [[ -z "${ANSIBLE_LOCAL_TEMP:-}" ]]; then
+        ANSIBLE_TMP_OWNED="$(mktemp -d "${TMPDIR:-/tmp}/machstrap-ansible.XXXXXX")"
+        chmod 700 "$ANSIBLE_TMP_OWNED"
+        export ANSIBLE_LOCAL_TEMP="$ANSIBLE_TMP_OWNED"
+    fi
+    mode=APPLY
+    [[ "$action" != check ]] || mode=VALIDATE
+    [[ "$check" != true ]] || mode="DRY RUN"
+    REPORT_TMP="$(mktemp "${TMPDIR:-/tmp}/machstrap-report.XXXXXX")"
+    chmod 600 "$REPORT_TMP"
+    started=$SECONDS
+    set +e
+    "${command[@]}" 2>&1 | tee "$REPORT_TMP"
+    ansible_status=${PIPESTATUS[0]}
+    set -e
+    render_run_report "$REPORT_TMP" "$ansible_status" "$mode" "$profile" "$target_description" "$((SECONDS - started))"
+    rm -f -- "$REPORT_TMP"
+    REPORT_TMP=""
+    return "$ansible_status"
+}
+
+main() {
+    local command="${1:-}"
+    [[ -n "$command" ]] || { usage; return 2; }
+    shift
+    case "$command" in
+        --version) [[ $# -eq 0 ]] || { err "--version accepts no arguments"; return 2; }; version_command ;;
+        doctor) [[ $# -eq 0 ]] || { err "doctor accepts no arguments"; return 2; }; doctor ;;
+        config) config_command "$@" ;;
+        profiles) profiles_command "$@" ;;
+        init) init_profile "$@" ;;
+        bundle) bundle_create "$@" ;;
+        check|apply)
+            [[ $# -ge 1 ]] || { err "$command requires a profile or bundle"; return 2; }
+            local profile="$1"
+            shift
+            run_ansible "$command" "$profile" "$@"
+            ;;
+        help|-h|--help) usage ;;
+        *) err "unknown command: $command"; usage >&2; return 2 ;;
+    esac
+}
+
+main "$@"

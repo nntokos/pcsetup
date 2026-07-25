@@ -1,0 +1,222 @@
+---
+- name: Define supported configuration keys
+  ansible.builtin.set_fact:
+    machstrap_supported_keys:
+      - hostname
+      - packages
+      - git_config
+      - git_repos
+      - dotfiles
+      - dotfile_sources
+      - folder_sources
+      - dotfiles_repo
+      - github_ssh
+      - ssh
+      - macos
+      - commands
+      - static_network
+      - firewall
+      - wireguard
+      - plex
+
+- name: Validate top-level configuration shape
+  ansible.builtin.assert:
+    that:
+      - machstrap is mapping
+      - machstrap.keys() | difference(machstrap_supported_keys) | length == 0
+      - machstrap.hostname is mapping
+      - machstrap.packages is mapping
+      - machstrap.git_config is mapping
+      - machstrap.git_repos is sequence
+      - machstrap.dotfiles is sequence
+      - machstrap.dotfile_sources is sequence
+      - machstrap.folder_sources is sequence
+      - machstrap.dotfiles_repo is mapping
+      - machstrap.github_ssh is mapping
+      - machstrap.ssh is mapping
+      - machstrap.macos is mapping
+      - machstrap.commands is sequence
+      - machstrap.static_network is mapping
+      - machstrap.firewall is mapping
+      - machstrap.wireguard is mapping
+      - machstrap.plex is mapping
+    fail_msg: The merged profile contains an unsupported key or value type.
+
+- name: Validate package lists
+  ansible.builtin.assert:
+    that:
+      - machstrap.packages.keys() | difference(['apt', 'snap', 'brew', 'cask', 'pip']) | length == 0
+      - machstrap.packages.apt | default([]) is sequence and machstrap.packages.apt | default([]) is not string
+      - machstrap.packages.snap | default([]) is sequence and machstrap.packages.snap | default([]) is not string
+      - machstrap.packages.brew | default([]) is sequence and machstrap.packages.brew | default([]) is not string
+      - machstrap.packages.cask | default([]) is sequence and machstrap.packages.cask | default([]) is not string
+      - machstrap.packages.pip | default([]) is sequence and machstrap.packages.pip | default([]) is not string
+    fail_msg: Package providers must be apt, snap, brew, cask, or pip lists.
+
+- name: Validate hostname keys
+  ansible.builtin.assert:
+    that: machstrap.hostname.keys() | difference(['computer_name', 'local_hostname', 'hostname']) | length == 0
+    fail_msg: Hostname supports computer_name, local_hostname, and hostname.
+
+- name: Validate inline dotfile operations
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | difference(['path', 'mode', 'block', 'lines']) | length == 0
+      - item.path | default('') is string
+      - item.path | default('') is match('^~/')
+      - item.mode | default('') in ['append', 'prepend', 'replace']
+      - item.block | default('') is string
+      - item.block | default('') | length > 0
+      - item.lines | default([]) is sequence
+      - item.lines | default([]) is not string
+    fail_msg: Each dotfile operation needs path, mode, stable block, and lines.
+  loop: "{{ machstrap.dotfiles }}"
+  loop_control:
+    label: "{{ item.path | default('invalid dotfile') }}"
+
+- name: Validate copied dotfile declarations
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | difference(['source', 'destination', 'mode']) | length == 0
+      - item.source | default('') is string
+      - item.destination | default('') is match('^~/')
+      - item.mode | default('0644') is match('^0[0-7]{3,4}$')
+    fail_msg: Copied dotfiles require a relative source, ~/ destination, and octal mode.
+  loop: "{{ machstrap.dotfile_sources }}"
+  loop_control:
+    label: "{{ item.destination | default('invalid dotfile source') }}"
+
+- name: Validate copied folder declarations
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | difference(['source', 'destination', 'directory_mode']) | length == 0
+      - item.source | default('') is string
+      - item.destination | default('') is match('^~/')
+      - item.directory_mode | default('0755') is match('^0[0-7]{3,4}$')
+    fail_msg: Copied folders require a relative source, ~/ destination, and octal directory_mode.
+  loop: "{{ machstrap.folder_sources }}"
+  loop_control:
+    label: "{{ item.destination | default('invalid folder source') }}"
+
+- name: Validate Git repository declarations
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | difference(['repo', 'path', 'branch', 'depth']) | length == 0
+      - item.repo | default('') is string
+      - item.repo | default('') | length > 0
+      - item.path | default('') is match('^~/|^/')
+      - item.branch | default('') is string
+      - item.branch | default('') | length > 0
+    fail_msg: Git repositories require repo, path, and branch.
+  loop: "{{ machstrap.git_repos }}"
+  loop_control:
+    label: "{{ item.repo | default('invalid repository') }}"
+
+- name: Validate command declarations
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | difference(['command', 'chdir', 'creates', 'removes', 'no_log']) | length == 0
+      - item.command | default('') is string
+      - item.command | default('') | length > 0
+    fail_msg: Commands require a non-empty command and only supported controls.
+  loop: "{{ machstrap.commands }}"
+  loop_control:
+    label: "{{ item.command | default('invalid command') }}"
+
+- name: Validate SSH safety settings
+  ansible.builtin.assert:
+    that:
+      - machstrap.ssh.keys() | difference(['enabled', 'authorized_keys', 'allow_password', 'port']) | length == 0
+      - machstrap.ssh.port | default(22) | int >= 1
+      - machstrap.ssh.port | default(22) | int <= 65535
+      - machstrap.ssh.authorized_keys | default([]) is sequence and machstrap.ssh.authorized_keys | default([]) is not string
+      - not (machstrap.ssh.enabled | default(false) | bool) or
+        (machstrap.ssh.allow_password | default(false) | bool) or
+        (machstrap.ssh.authorized_keys | default([]) | length > 0)
+    fail_msg: >-
+      SSH ports must be valid. Enabling SSH with password authentication
+      disabled also requires at least one authorized key.
+
+- name: Validate guarded static-network settings
+  ansible.builtin.assert:
+    that:
+      - not (machstrap.static_network.enabled | default(false) | bool) or machstrap.static_network.address is defined
+      - not (machstrap.static_network.enabled | default(false) | bool) or machstrap.static_network.only_on_subnet is defined
+    fail_msg: Static networking requires address and only_on_subnet.
+
+- name: Validate WireGuard settings
+  ansible.builtin.assert:
+    that:
+      - machstrap.wireguard.listen_port | default(51820) | int >= 1
+      - machstrap.wireguard.listen_port | default(51820) | int <= 65535
+      - machstrap.wireguard.peers | default([]) is sequence and machstrap.wireguard.peers | default([]) is not string
+    fail_msg: WireGuard requires a valid listen port and a peers list.
+
+- name: Validate Plex settings
+  ansible.builtin.assert:
+    that:
+      - not (machstrap.plex.enabled | default(false) | bool) or machstrap.plex.media_paths is defined
+      - not (machstrap.plex.enabled | default(false) | bool) or
+        (machstrap.plex.media_paths is sequence and machstrap.plex.media_paths is not string)
+      - not (machstrap.plex.enabled | default(false) | bool) or machstrap.plex.media_paths | length > 0
+    fail_msg: Enabled Plex configuration requires at least one media path.
+
+- name: Build the profile asset list
+  ansible.builtin.set_fact:
+    machstrap_asset_entries: >-
+      {{
+        (machstrap.dotfile_sources | default([]) | map('combine', {'asset_kind': 'file'}) | list)
+        +
+        (machstrap.folder_sources | default([]) | map('combine', {'asset_kind': 'directory'}) | list)
+      }}
+
+- name: Resolve profile assets on the controller
+  ansible.builtin.stat:
+    path: "{{ ([machstrap_profile_root, item.source] | path_join) | realpath }}"
+    follow: false
+  loop: "{{ machstrap_asset_entries }}"
+  loop_control:
+    label: "{{ item.source | default('missing source') }}"
+  register: machstrap_asset_stats
+  delegate_to: localhost
+  become: false
+
+- name: Require confined, existing, non-symlink assets
+  ansible.builtin.assert:
+    that:
+      - item.item.source is string
+      - item.item.source | length > 0
+      - not item.item.source.startswith('/')
+      - (([machstrap_profile_root, item.item.source] | path_join) | realpath).startswith(machstrap_profile_root + '/')
+      - item.stat.exists
+      - not item.stat.islnk
+      - (item.item.asset_kind == 'file' and item.stat.isreg) or
+        (item.item.asset_kind == 'directory' and item.stat.isdir)
+    fail_msg: "Unsafe or missing profile asset: {{ item.item.source | default('undefined') }}"
+  loop: "{{ machstrap_asset_stats.results }}"
+  loop_control:
+    label: "{{ item.item.source | default('missing source') }}"
+
+- name: Find every profile entry without following links
+  ansible.builtin.find:
+    paths: "{{ machstrap_profile_root }}"
+    recurse: true
+    hidden: true
+    follow: false
+    file_type: any
+  register: machstrap_profile_entries
+  delegate_to: localhost
+  become: false
+
+- name: Reject symbolic links anywhere in a profile
+  ansible.builtin.assert:
+    that:
+      - machstrap_profile_entries.files | selectattr('islnk', 'defined') | selectattr('islnk') | list | length == 0
+    fail_msg: Profiles may not contain symbolic links.
+  delegate_to: localhost
+  become: false

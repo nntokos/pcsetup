@@ -1,0 +1,37 @@
+---
+- name: Set Linux hostname
+  ansible.builtin.hostname:
+    name: "{{ machstrap.hostname.hostname | default(machstrap.hostname.local_hostname) }}"
+  become: true
+  when:
+    - machstrap_is_linux
+    - machstrap.hostname.hostname is defined or machstrap.hostname.local_hostname is defined
+
+- name: Read current macOS machine names
+  ansible.builtin.command:
+    argv: [scutil, --get, "{{ item.scutil }}"]
+  loop:
+    - {key: computer_name, scutil: ComputerName}
+    - {key: local_hostname, scutil: LocalHostName}
+    - {key: hostname, scutil: HostName}
+  register: machstrap_macos_names
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - machstrap_is_macos
+    - machstrap.hostname[item.key] is defined
+
+- name: Set macOS machine names
+  ansible.builtin.command:
+    argv:
+      - scutil
+      - --set
+      - "{{ item.item.scutil }}"
+      - "{{ machstrap.hostname[item.item.key] }}"
+  loop: "{{ machstrap_macos_names.results | default([]) }}"
+  become: true
+  when:
+    - not item.skipped | default(false)
+    - item.stdout != machstrap.hostname[item.item.key]
+    - not ansible_check_mode

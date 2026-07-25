@@ -1,0 +1,35 @@
+---
+- name: Read existing macOS defaults
+  ansible.builtin.command:
+    argv: [defaults, read, "{{ item.domain }}", "{{ item.key }}"]
+  loop: "{{ machstrap.macos.defaults | default([]) }}"
+  register: machstrap_macos_defaults
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: machstrap_is_macos
+
+- name: Write changed macOS defaults
+  ansible.builtin.command:
+    argv:
+      - defaults
+      - write
+      - "{{ item.item.domain }}"
+      - "{{ item.item.key }}"
+      - "-{{ item.item.type }}"
+      - "{{ item.item.value | string }}"
+  loop: "{{ machstrap_macos_defaults.results | default([]) }}"
+  register: machstrap_macos_defaults_write
+  when:
+    - machstrap_is_macos
+    - not item.skipped | default(false)
+    - item.stdout != item.item.value | string
+
+- name: Restart configured macOS services
+  ansible.builtin.command: "killall {{ item }}"
+  loop: "{{ machstrap.macos.restart | default([]) }}"
+  failed_when: false
+  changed_when: true
+  when:
+    - machstrap_is_macos
+    - machstrap_macos_defaults_write is changed

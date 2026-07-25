@@ -1,0 +1,16 @@
+---
+- name: Validate a machstrap profile without changing targets
+  hosts: all
+  gather_facts: false
+  vars_files:
+    - ../config/defaults.yml
+  vars:
+    # Validation does not connect to targets. These facts provide only the
+    # neutral values needed by the shared loader.
+    ansible_facts:
+      user_dir: /tmp/machstrap-validation-home
+      system: Validation
+  tasks:
+    - name: Load and validate the selected profile
+      ansible.builtin.import_tasks: load-profile.yml
+      tags: [always]

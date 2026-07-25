@@ -1,0 +1,14 @@
+[Interface]
+Address = {{ machstrap.wireguard.address | default('10.8.0.1/24') }}
+ListenPort = {{ machstrap.wireguard.listen_port | default(51820) }}
+PrivateKey = {{ machstrap_wireguard_private.content | b64decode | trim }}
+PostUp = iptables -I FORWARD 1 -i {{ wireguard_interface }} -j ACCEPT; iptables -I FORWARD 1 -o {{ wireguard_interface }} -j ACCEPT; iptables -t nat -A POSTROUTING -o {{ wireguard_outbound }} -j MASQUERADE
+PreDown = iptables -D FORWARD -i {{ wireguard_interface }} -j ACCEPT; iptables -D FORWARD -o {{ wireguard_interface }} -j ACCEPT; iptables -t nat -D POSTROUTING -o {{ wireguard_outbound }} -j MASQUERADE
+{% for peer in machstrap.wireguard.peers | default([]) %}
+
+# {{ peer.name }}
+[Peer]
+PublicKey = {{ peer.public_key }}
+{% if peer.preshared_key is defined %}PresharedKey = {{ peer.preshared_key }}
+{% endif %}AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+{% endfor %}

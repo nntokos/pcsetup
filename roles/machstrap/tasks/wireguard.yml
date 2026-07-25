@@ -1,0 +1,107 @@
+---
+- name: Define WireGuard values
+  ansible.builtin.set_fact:
+    wireguard_interface: "{{ machstrap.wireguard.interface | default('wg0') }}"
+    wireguard_outbound: >-
+      {{ ansible_default_ipv4.interface
+         if machstrap.wireguard.outbound_interface | default('auto') == 'auto'
+         else machstrap.wireguard.outbound_interface }}
+    wireguard_private_key_path: "{{ machstrap.wireguard.private_key_path | default('/etc/wireguard/server.key') }}"
+
+- name: Require Linux for WireGuard
+  ansible.builtin.assert:
+    that: machstrap_is_linux
+    fail_msg: The WireGuard server currently supports Linux.
+
+- name: Install WireGuard and iptables
+  ansible.builtin.apt:
+    name: [wireguard, iptables]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Ensure the WireGuard directory exists
+  ansible.builtin.file:
+    path: "{{ wireguard_private_key_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+
+- name: Generate the server private key once
+  ansible.builtin.shell: "umask 077 && wg genkey > {{ wireguard_private_key_path | quote }}"
+  args:
+    creates: "{{ wireguard_private_key_path }}"
+  no_log: true
+  become: true
+
+- name: Check whether the server private key exists
+  ansible.builtin.stat:
+    path: "{{ wireguard_private_key_path }}"
+  register: machstrap_wireguard_private_stat
+  become: true
+
+- name: Read the server private key
+  ansible.builtin.slurp:
+    src: "{{ wireguard_private_key_path }}"
+  register: machstrap_wireguard_private
+  no_log: true
+  become: true
+  when: machstrap_wireguard_private_stat.stat.exists
+
+- name: Enable IPv4 forwarding
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-machstrap-wireguard.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: "net.ipv4.ip_forward = 1\n"
+  register: machstrap_wireguard_sysctl
+  become: true
+
+- name: Load forwarding settings
+  ansible.builtin.command: sysctl --system
+  become: true
+  when:
+    - machstrap_wireguard_sysctl is changed
+    - not ansible_check_mode
+
+- name: Write the WireGuard server configuration
+  ansible.builtin.template:
+    src: wireguard.conf.j2
+    dest: "/etc/wireguard/{{ wireguard_interface }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  become: true
+  notify: Restart WireGuard
+  when: machstrap_wireguard_private_stat.stat.exists
+
+- name: Enable the WireGuard service
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ wireguard_interface }}"
+    enabled: true
+    state: started
+  become: true
+  when: not ansible_check_mode
+
+- name: Derive the server public key
+  ansible.builtin.shell: "wg pubkey < {{ wireguard_private_key_path | quote }}"
+  register: machstrap_wireguard_public
+  changed_when: false
+  check_mode: false
+  become: true
+  when: machstrap_wireguard_private_stat.stat.exists
+
+- name: Show the WireGuard server public key
+  ansible.builtin.debug:
+    msg: "WireGuard server public key: {{ machstrap_wireguard_public.stdout }}"
+  when: machstrap_wireguard_private_stat.stat.exists
+
+- name: Explain first-run key output in check mode
+  ansible.builtin.debug:
+    msg: The WireGuard server public key appears after the first real apply.
+  when: not machstrap_wireguard_private_stat.stat.exists

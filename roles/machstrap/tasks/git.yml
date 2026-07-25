@@ -1,0 +1,24 @@
+---
+- name: Read current global Git settings
+  ansible.builtin.command:
+    argv: [git, config, --global, --get, "{{ item.key }}"]
+  loop: "{{ machstrap.git_config | dict2items }}"
+  register: machstrap_git_config_current
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Set changed global Git settings
+  ansible.builtin.command:
+    argv: [git, config, --global, "{{ item.item.key }}", "{{ item.item.value | string }}"]
+  loop: "{{ machstrap_git_config_current.results }}"
+  when: item.stdout != item.item.value | string
+
+- name: Clone or update Git repositories
+  ansible.builtin.git:
+    repo: "{{ item.repo }}"
+    dest: "{{ item.path | regex_replace('^~', machstrap_home) }}"
+    version: "{{ item.branch }}"
+    depth: "{{ item.depth | default(omit, true) }}"
+    update: true
+  loop: "{{ machstrap.git_repos }}"

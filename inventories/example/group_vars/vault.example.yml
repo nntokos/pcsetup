@@ -1,0 +1,12 @@
+---
+# TEMPLATE ONLY — do not place real secrets in this unencrypted file.
+#
+# Create the actual encrypted file:
+#   ansible-vault create inventories/my-site/group_vars/vault.yml
+#
+# Apply with `--ask-vault-pass`, or use a protected password file outside the
+# repository with `--vault-password-file`.
+# machstrap_vault_overrides:
+#   plex:
+#     claim: REPLACE_INSIDE_ENCRYPTED_VAULT
+machstrap_vault_overrides: {}

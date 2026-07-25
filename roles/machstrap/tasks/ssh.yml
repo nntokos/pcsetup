@@ -1,0 +1,102 @@
+---
+- name: Install the OpenSSH server
+  ansible.builtin.apt:
+    name: openssh-server
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - machstrap_is_linux
+    - machstrap.ssh.enabled | default(false)
+
+- name: Ensure the user SSH directory exists
+  ansible.builtin.file:
+    path: "{{ machstrap_home }}/.ssh"
+    state: directory
+    mode: "0700"
+  when: machstrap.ssh.enabled | default(false) or machstrap.github_ssh.enabled | default(false)
+
+- name: Install authorized SSH keys
+  ansible.builtin.lineinfile:
+    path: "{{ machstrap_home }}/.ssh/authorized_keys"
+    line: "{{ item }}"
+    create: true
+    mode: "0600"
+  loop: "{{ machstrap.ssh.authorized_keys | default([]) }}"
+  when:
+    - machstrap_is_linux
+    - machstrap.ssh.enabled | default(false)
+
+- name: Configure sshd safely through a drop-in
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/90-machstrap.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by machstrap
+      PasswordAuthentication {{ 'yes' if machstrap.ssh.allow_password | default(false) else 'no' }}
+      Port {{ machstrap.ssh.port | default(22) }}
+  become: true
+  notify: Restart SSH
+  when:
+    - machstrap_is_linux
+    - machstrap.ssh.enabled | default(false)
+
+- name: Enable the SSH service
+  ansible.builtin.service:
+    name: ssh
+    enabled: true
+    state: started
+  become: true
+  when:
+    - machstrap_is_linux
+    - machstrap.ssh.enabled | default(false)
+
+- name: Generate a GitHub SSH key if requested
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -t
+      - "{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+      - -C
+      - "{{ machstrap.github_ssh.email | default(ansible_facts['user_id'] + '@machstrap', true) }}"
+      - -f
+      - "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+      - -N
+      - ""
+    creates: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+  when: machstrap.github_ssh.enabled | default(false)
+
+- name: Check whether the GitHub public key exists
+  ansible.builtin.stat:
+    path: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub"
+  register: machstrap_github_public_key_stat
+  when: machstrap.github_ssh.enabled | default(false)
+
+- name: Read the GitHub public key
+  ansible.builtin.slurp:
+    src: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub"
+  register: machstrap_github_public_key
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_public_key_stat.stat.exists
+
+- name: Show the GitHub public key that must be registered
+  ansible.builtin.debug:
+    msg:
+      - "Register this SSH key with GitHub at https://github.com/settings/ssh/new"
+      - "{{ machstrap_github_public_key.content | b64decode | trim }}"
+  tags: [machstrap_notice]
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_public_key_stat.stat.exists
+
+- name: Explain GitHub key output during check mode
+  ansible.builtin.debug:
+    msg: The GitHub public key will be displayed after the first real apply.
+  tags: [machstrap_notice]
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - not machstrap_github_public_key_stat.stat.exists

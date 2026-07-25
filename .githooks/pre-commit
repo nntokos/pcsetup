@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+repository=$(git rev-parse --show-toplevel)
+cd "$repository"
+
+printf '%s\n' "machstrap hook: running fast checks before commit" >&2
+./tests/run-tests.sh

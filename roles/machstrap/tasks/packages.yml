@@ -1,0 +1,70 @@
+---
+- name: Install APT packages
+  ansible.builtin.apt:
+    name: '{{ machstrap.packages.apt + (["snapd"] if machstrap.packages.snap | length > 0 else []) }}'
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - machstrap_is_linux
+    - (machstrap.packages.apt | length > 0) or (machstrap.packages.snap | length > 0)
+
+- name: Check installed Snap packages
+  ansible.builtin.command:
+    argv: [snap, list, "{{ item.name }}"]
+  loop: "{{ machstrap.packages.snap }}"
+  register: machstrap_snap_status
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when: machstrap_is_linux
+
+- name: Install missing Snap packages
+  ansible.builtin.command:
+    argv: "{{ ['snap', 'install', '--channel', item.item.channel] + (['--classic'] if item.item.classic else []) + [item.item.name] }}"
+  loop: "{{ machstrap_snap_status.results | default([]) }}"
+  when:
+    - machstrap_is_linux
+    - not item.skipped | default(false)
+    - item.rc != 0
+
+- name: Require Homebrew when macOS packages are requested
+  ansible.builtin.command: brew --version
+  register: machstrap_brew
+  changed_when: false
+  check_mode: false
+  when:
+    - machstrap_is_macos
+    - (machstrap.packages.brew + machstrap.packages.cask) | length > 0
+
+- name: Install Homebrew formulae
+  ansible.builtin.package:
+    name: "{{ machstrap.packages.brew }}"
+    state: present
+  when:
+    - machstrap_is_macos
+    - machstrap.packages.brew | length > 0
+
+- name: Check installed Homebrew casks
+  ansible.builtin.command: "brew list --cask {{ item }}"
+  loop: "{{ machstrap.packages.cask }}"
+  register: machstrap_cask_status
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when: machstrap_is_macos
+
+- name: Install missing Homebrew casks
+  ansible.builtin.command: "brew install --cask {{ item.item }}"
+  loop: "{{ machstrap_cask_status.results | default([]) }}"
+  when:
+    - machstrap_is_macos
+    - not item.skipped | default(false)
+    - item.rc != 0
+
+- name: Install user Python packages
+  ansible.builtin.pip:
+    name: "{{ machstrap.packages.pip }}"
+    extra_args: --user
+  when: machstrap.packages.pip | length > 0

@@ -1,0 +1,48 @@
+---
+- name: Configure hostname
+  ansible.builtin.import_tasks: hostname.yml
+  tags: [hostname]
+
+- name: Install packages
+  ansible.builtin.import_tasks: packages.yml
+  tags: [packages]
+
+- name: Configure SSH
+  ansible.builtin.import_tasks: ssh.yml
+  tags: [ssh]
+
+- name: Configure files and dotfiles
+  ansible.builtin.import_tasks: dotfiles.yml
+  tags: [dotfiles]
+
+- name: Configure macOS settings
+  ansible.builtin.import_tasks: macos.yml
+  tags: [macos]
+
+- name: Configure Git
+  ansible.builtin.import_tasks: git.yml
+  tags: [git]
+
+- name: Run explicit commands
+  ansible.builtin.import_tasks: commands.yml
+  tags: [commands]
+
+- name: Configure guarded static networking
+  ansible.builtin.include_tasks: static-network.yml
+  when: machstrap.static_network.enabled | default(false) | bool
+  tags: [network]
+
+- name: Configure the firewall
+  ansible.builtin.include_tasks: firewall.yml
+  when: machstrap.firewall.configured | default(false) | bool
+  tags: [firewall]
+
+- name: Configure WireGuard
+  ansible.builtin.include_tasks: wireguard.yml
+  when: machstrap.wireguard.enabled | default(false) | bool
+  tags: [wireguard]
+
+- name: Configure Plex
+  ansible.builtin.include_tasks: plex.yml
+  when: machstrap.plex.enabled | default(false) | bool
+  tags: [plex]

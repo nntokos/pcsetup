@@ -1,0 +1,48 @@
+---
+- name: Require Linux for UFW
+  ansible.builtin.assert:
+    that: machstrap_is_linux
+    fail_msg: Firewall configuration currently supports Linux with UFW.
+
+- name: Install UFW
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Set the incoming firewall policy
+  ansible.builtin.command:
+    argv: [ufw, default, "{{ machstrap.firewall.default_incoming | default('deny') }}", incoming]
+  register: machstrap_ufw_incoming
+  changed_when: "'policy changed' in machstrap_ufw_incoming.stdout"
+  become: true
+
+- name: Set the outgoing firewall policy
+  ansible.builtin.command:
+    argv: [ufw, default, "{{ machstrap.firewall.default_outgoing | default('allow') }}", outgoing]
+  register: machstrap_ufw_outgoing
+  changed_when: "'policy changed' in machstrap_ufw_outgoing.stdout"
+  become: true
+
+- name: Add explicit firewall rules
+  ansible.builtin.command:
+    argv: >-
+      {{ ['ufw', 'allow', 'from', item.from | default('any'), 'to', 'any',
+          'port', item.port | string, 'proto', item.protocol | default('tcp')]
+         + ((['comment', item.comment]) if item.comment is defined else []) }}
+  loop: "{{ machstrap.firewall.rules | default([]) }}"
+  register: machstrap_ufw_rules
+  changed_when: "'Rule added' in machstrap_ufw_rules.stdout"
+  become: true
+
+- name: Set the requested UFW state
+  ansible.builtin.command:
+    argv: "{{ ['ufw', '--force', 'enable'] if machstrap.firewall.enabled | default(true) | bool else ['ufw', 'disable'] }}"
+  register: machstrap_ufw_state
+  changed_when: >-
+    ('already enabled' not in machstrap_ufw_state.stdout)
+    if machstrap.firewall.enabled | default(true) | bool
+    else ('stopped and disabled' in machstrap_ufw_state.stdout)
+  become: true

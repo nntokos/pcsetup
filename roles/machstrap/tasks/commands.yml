@@ -1,0 +1,9 @@
+---
+- name: Run explicitly configured commands
+  ansible.builtin.shell: "{{ item.command }}"
+  args:
+    chdir: "{{ (item.chdir | regex_replace('^~', machstrap_home)) if item.chdir is defined else omit }}"
+    creates: "{{ (item.creates | regex_replace('^~', machstrap_home)) if item.creates is defined else omit }}"
+    removes: "{{ (item.removes | regex_replace('^~', machstrap_home)) if item.removes is defined else omit }}"
+  no_log: "{{ item.no_log | default(false) }}"
+  loop: "{{ machstrap.commands }}"
