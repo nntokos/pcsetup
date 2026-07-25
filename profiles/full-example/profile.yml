@@ -1,0 +1,164 @@
+---
+# Complete machstrap profile reference.
+#
+# Copy this directory with:
+#   ./machstrap init ~/machine-configs/my-machine
+#
+# Preview it locally:
+#   ./machstrap check ~/machine-configs/my-machine --local
+#   ./machstrap apply ~/machine-configs/my-machine --local --check --diff
+#
+# A profile contains desired machine state only. SSH connection data belongs
+# in inventory; secrets belong in an encrypted Ansible Vault file.
+machstrap_profile:
+  # Names are explicit so the same profile is predictable on Linux and macOS.
+  # On Linux, `hostname` is used. macOS can apply all three names.
+  hostname: {}
+    # computer_name: My Computer
+    # local_hostname: my-computer
+    # hostname: my-computer
+
+  # Providers are explicit. Irrelevant providers are skipped by platform.
+  # `pip` remains available for machines that intentionally need user Python
+  # packages; machstrap itself does not use or install any.
+  packages:
+    apt: []
+    snap: []
+    brew: []
+    cask: []
+    pip: []
+    # snap entries:
+    #   - name: code
+    #     channel: stable
+    #     classic: true
+
+  # Values are passed to `git config --global`.
+  git_config: {}
+    # user.name: Your Name
+    # user.email: you@example.com
+    # init.defaultBranch: main
+
+  # Clone or update reviewed repositories.
+  git_repos: []
+    # - repo: https://github.com/example/project.git
+    #   path: ~/src/project
+    #   branch: main
+    #   depth: 1
+
+  # Inline file operations. Each block ID must remain stable across edits.
+  dotfiles: []
+    # - path: ~/.zshrc
+    #   mode: append       # append, prepend, or replace
+    #   block: shell-path
+    #   lines:
+    #     - export PATH="$HOME/bin:$PATH"
+
+  # Sources are always relative to this profile directory. Absolute paths,
+  # traversal, and symlinks are rejected before Ansible connects to a target.
+  dotfile_sources: []
+    # - source: assets/files/gitconfig
+    #   destination: ~/.gitconfig
+    #   mode: "0644"
+
+  folder_sources: []
+    # - source: assets/files/nvim
+    #   destination: ~/.config/nvim
+    #   directory_mode: "0755"
+
+  # Optional dotfiles repository. The symlink mode links each top-level entry
+  # into $HOME and backs up displaced entries under ~/.machstrap-backup.
+  dotfiles_repo: {}
+    # repo: https://github.com/you/dotfiles.git
+    # path: ~/.dotfiles
+    # branch: main
+    # method: symlink     # symlink, stow, script, or none
+    # stow_packages: [shell, git]
+    # script: ./install.sh
+
+  # Generate a client key for GitHub. The public key is displayed for manual
+  # registration; the private key never leaves the managed host.
+  github_ssh:
+    enabled: false
+    email: ""
+    key_type: ed25519
+
+  # Linux SSH server. Enabling it while passwords are disabled requires at
+  # least one real public key, preventing an obvious lockout configuration.
+  ssh:
+    enabled: false
+    authorized_keys: []
+      # - ssh-ed25519 AAAA... operator@example
+    allow_password: false
+    port: 22
+
+  # macOS `defaults write` settings and processes to restart after a change.
+  macos:
+    defaults: []
+      # - domain: NSGlobalDomain
+      #   key: AppleShowAllExtensions
+      #   value: true
+      #   type: bool
+    restart: []
+      # - Finder
+      # - Dock
+
+  # Last-resort commands run as the login user. Prefer a declarative module or
+  # a reviewed hook. `creates` and `removes` make commands idempotent.
+  commands: []
+    # - command: ./configure
+    #   chdir: ~/src/project
+    #   creates: ~/src/project/.configured
+    #   no_log: false
+
+  # Linux/Netplan only. The current subnet must match before any file changes.
+  # Changing a live remote interface can still disconnect the controller;
+  # always use --check and maintain console access for the first run.
+  static_network:
+    enabled: false
+    address: 192.168.1.100/24
+    only_on_subnet: 192.168.1.0/24
+    interface: auto
+    gateway: auto
+    dns: []
+    apply: true
+
+  # Linux/UFW only. `configured` controls whether machstrap manages UFW;
+  # `enabled` controls the resulting UFW service state.
+  firewall:
+    configured: false
+    enabled: true
+    default_incoming: deny
+    default_outgoing: allow
+    rules: []
+      # - port: 22
+      #   protocol: tcp
+      #   from: 192.168.1.0/24
+      #   comment: Administrative SSH
+
+  # Linux WireGuard server. The private key is generated once on the server.
+  wireguard:
+    enabled: false
+    interface: wg0
+    address: 10.8.0.1/24
+    listen_port: 51820
+    private_key_path: /etc/wireguard/server.key
+    outbound_interface: auto
+    peers: []
+      # - name: laptop
+      #   public_key: BASE64_PUBLIC_KEY=
+      #   allowed_ips: [10.8.0.2/32]
+      #   preshared_key: OPTIONAL_BASE64_KEY=
+
+  # Linux/Docker Plex service. Put a claim token in Vault via
+  # `machstrap_overrides.plex.claim`, never in this profile.
+  plex:
+    enabled: false
+    image: lscr.io/linuxserver/plex:latest
+    config_path: /srv/plex/config
+    transcode_path: /srv/plex/transcode
+    media_paths: [/srv/media]
+    timezone: UTC
+    uid: 1000
+    gid: 1000
+    claim: ""
+    update_image: false

@@ -1,0 +1,35 @@
+---
+# Safe Debian/Ubuntu server baseline. Add a real authorized key before enabling
+# the SSH server; profile validation rejects a keyless password-disabled setup.
+machstrap_profile:
+  hostname:
+    hostname: machstrap-linux-server
+  packages:
+    apt: [git, curl, ca-certificates, unattended-upgrades, ufw]
+    snap: []
+    brew: []
+    cask: []
+    pip: []
+  git_config: {init.defaultBranch: main}
+  git_repos: []
+  dotfiles: []
+  dotfile_sources: []
+  folder_sources: []
+  dotfiles_repo: {}
+  github_ssh: {enabled: false, email: "", key_type: ed25519}
+  ssh:
+    enabled: false
+    authorized_keys: []
+    allow_password: false
+    port: 22
+  macos: {defaults: [], restart: []}
+  commands: []
+  static_network: {enabled: false}
+  firewall:
+    configured: false
+    enabled: true
+    default_incoming: deny
+    default_outgoing: allow
+    rules: []
+  wireguard: {enabled: false}
+  plex: {enabled: false}

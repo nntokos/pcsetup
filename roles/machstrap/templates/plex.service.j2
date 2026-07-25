@@ -1,0 +1,14 @@
+[Unit]
+Description=Plex Media Server managed by machstrap
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=5
+ExecStartPre=-/usr/bin/docker rm -f machstrap-plex
+ExecStart=/usr/bin/docker run --name machstrap-plex --network host --env-file /etc/machstrap-plex.env -v {{ machstrap.plex.config_path | default('/srv/plex/config') }}:/config -v {{ machstrap.plex.transcode_path | default('/srv/plex/transcode') }}:/transcode{% for media_path in machstrap.plex.media_paths %} -v {{ media_path }}:{{ media_path }}:ro{% endfor %} {{ plex_image }}
+ExecStop=/usr/bin/docker stop -t 30 machstrap-plex
+
+[Install]
+WantedBy=multi-user.target

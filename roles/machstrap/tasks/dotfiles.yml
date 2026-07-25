@@ -1,0 +1,163 @@
+---
+- name: Ensure inline dotfile parent directories exist
+  ansible.builtin.file:
+    path: "{{ (item.path | regex_replace('^~', machstrap_home)) | dirname }}"
+    state: directory
+  loop: "{{ machstrap.dotfiles }}"
+
+- name: Ensure copied dotfile parent directories exist
+  ansible.builtin.file:
+    path: "{{ (item.destination | regex_replace('^~', machstrap_home)) | dirname }}"
+    state: directory
+  loop: "{{ machstrap.dotfile_sources | default([]) }}"
+
+- name: Copy managed dotfiles from the configuration repository
+  ansible.builtin.copy:
+    src: "{{ machstrap_profile_root }}/{{ item.source }}"
+    dest: "{{ item.destination | regex_replace('^~', machstrap_home) }}"
+    mode: "{{ item.mode }}"
+  loop: "{{ machstrap.dotfile_sources | default([]) }}"
+
+- name: Ensure copied folder destinations exist
+  ansible.builtin.file:
+    path: "{{ item.destination | regex_replace('^~', machstrap_home) }}"
+    state: directory
+    mode: "{{ item.directory_mode }}"
+  loop: "{{ machstrap.folder_sources | default([]) }}"
+
+- name: Copy managed folder contents from the configuration repository
+  ansible.builtin.copy:
+    src: "{{ machstrap_profile_root }}/{{ item.source }}/"
+    dest: "{{ item.destination | regex_replace('^~', machstrap_home) }}/"
+    directory_mode: "{{ item.directory_mode }}"
+  loop: "{{ machstrap.folder_sources | default([]) }}"
+
+- name: Replace complete dotfiles
+  ansible.builtin.copy:
+    dest: "{{ item.path | regex_replace('^~', machstrap_home) }}"
+    content: "{{ item.lines | join('\n') }}\n"
+  loop: "{{ machstrap.dotfiles }}"
+  when: item.mode == 'replace'
+
+- name: Manage append and prepend dotfile blocks
+  ansible.builtin.blockinfile:
+    path: "{{ item.path | regex_replace('^~', machstrap_home) }}"
+    block: "{{ item.lines | join('\n') }}"
+    marker: "# {mark} machstrap:{{ item.block }} {mark}"
+    marker_begin: ">>>"
+    marker_end: "<<<"
+    create: true
+    insertbefore: "{{ 'BOF' if item.mode == 'prepend' else omit }}"
+    insertafter: "{{ 'EOF' if item.mode == 'append' else omit }}"
+  loop: "{{ machstrap.dotfiles }}"
+  when: item.mode in ['append', 'prepend']
+
+- name: Clone or update the dotfiles repository
+  ansible.builtin.git:
+    repo: "{{ machstrap.dotfiles_repo.repo }}"
+    dest: "{{ machstrap.dotfiles_repo.path | default('~/.dotfiles') | regex_replace('^~', machstrap_home) }}"
+    version: "{{ machstrap.dotfiles_repo.branch | default('main') }}"
+    update: true
+  when: machstrap.dotfiles_repo.repo is defined
+
+- name: Check whether the dotfiles repository is available
+  ansible.builtin.stat:
+    path: "{{ machstrap.dotfiles_repo.path | default('~/.dotfiles') | regex_replace('^~', machstrap_home) }}"
+  register: machstrap_dotfiles_repo_stat
+  when:
+    - machstrap.dotfiles_repo.repo is defined
+    - machstrap.dotfiles_repo.method | default('symlink') == 'symlink'
+
+- name: Explain first-run dotfile links in check mode
+  ansible.builtin.debug:
+    msg: Dotfile links will be created after the repository is cloned by the first real apply.
+  when:
+    - ansible_check_mode
+    - machstrap.dotfiles_repo.repo is defined
+    - machstrap.dotfiles_repo.method | default('symlink') == 'symlink'
+    - not machstrap_dotfiles_repo_stat.stat.isdir | default(false)
+
+- name: Discover top-level entries in the dotfiles repository
+  ansible.builtin.find:
+    paths: "{{ machstrap.dotfiles_repo.path | default('~/.dotfiles') | regex_replace('^~', machstrap_home) }}"
+    recurse: false
+    hidden: true
+    file_type: any
+  register: machstrap_dotfiles_entries
+  when:
+    - machstrap.dotfiles_repo.repo is defined
+    - machstrap.dotfiles_repo.method | default('symlink') == 'symlink'
+    - machstrap_dotfiles_repo_stat.stat.isdir | default(false)
+
+- name: Inspect existing dotfile destinations
+  ansible.builtin.stat:
+    path: "{{ machstrap_home }}/{{ item.path | basename }}"
+    follow: false
+  loop: "{{ machstrap_dotfiles_entries.files | default([]) }}"
+  register: machstrap_dotfiles_destinations
+  when:
+    - item.path | basename != '.git'
+
+- name: Ensure the displaced-dotfile backup directory exists
+  ansible.builtin.file:
+    path: "{{ machstrap_home }}/.machstrap-backup"
+    state: directory
+    mode: "0700"
+  when: >-
+    machstrap_dotfiles_destinations.results | default([])
+    | selectattr('stat.exists', 'defined')
+    | selectattr('stat.exists')
+    | list
+    | length > 0
+
+- name: Check backup destinations before moving displaced entries
+  ansible.builtin.stat:
+    path: "{{ machstrap_home }}/.machstrap-backup/{{ item.item.path | basename }}"
+    follow: false
+  loop: "{{ machstrap_dotfiles_destinations.results | default([]) }}"
+  register: machstrap_dotfiles_backups
+  when:
+    - item.stat.exists | default(false)
+    - not (item.stat.islnk | default(false) and item.stat.lnk_source | default('') == item.item.path)
+
+- name: Refuse to overwrite an earlier dotfile backup
+  ansible.builtin.assert:
+    that: not item.stat.exists | default(false)
+    fail_msg: >-
+      Cannot back up {{ item.item.item.path | basename }} because
+      ~/.machstrap-backup/{{ item.item.item.path | basename }} already exists.
+  loop: "{{ machstrap_dotfiles_backups.results | default([]) }}"
+  when: not item.skipped | default(false)
+
+- name: Back up displaced dotfiles
+  ansible.builtin.command:
+    argv:
+      - mv
+      - --
+      - "{{ machstrap_home }}/{{ item.item.item.path | basename }}"
+      - "{{ machstrap_home }}/.machstrap-backup/{{ item.item.item.path | basename }}"
+  loop: "{{ machstrap_dotfiles_backups.results | default([]) }}"
+  when: not item.skipped | default(false)
+
+- name: Link top-level dotfiles into the home directory
+  ansible.builtin.file:
+    src: "{{ item.path }}"
+    dest: "{{ machstrap_home }}/{{ item.path | basename }}"
+    state: link
+  loop: "{{ machstrap_dotfiles_entries.files | default([]) }}"
+  when: item.path | basename != '.git'
+
+- name: Install dotfiles with GNU Stow
+  ansible.builtin.command:
+    argv: "{{ ['stow', '-R', '-d', machstrap.dotfiles_repo.path | default('~/.dotfiles') | regex_replace('^~', machstrap_home), '-t', machstrap_home] + (machstrap.dotfiles_repo.stow_packages | default([])) }}"
+  when:
+    - machstrap.dotfiles_repo.repo is defined
+    - machstrap.dotfiles_repo.method | default('symlink') == 'stow'
+
+- name: Run an explicit dotfiles installer
+  ansible.builtin.shell: "{{ machstrap.dotfiles_repo.script }}"
+  args:
+    chdir: "{{ machstrap.dotfiles_repo.path | default('~/.dotfiles') | regex_replace('^~', machstrap_home) }}"
+  when:
+    - machstrap.dotfiles_repo.repo is defined
+    - machstrap.dotfiles_repo.method | default('symlink') == 'script'

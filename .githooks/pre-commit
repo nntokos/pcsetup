@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+repository=$(git rev-parse --show-toplevel)
+git_local_environment=$(git rev-parse --local-env-vars)
+unset $git_local_environment
+cd "$repository"
+
+printf '%s\n' "machstrap hook: checking changes before commit" >&2
+./tests/run-tests.sh

@@ -1,0 +1,41 @@
+---
+- name: Converge machines with machstrap
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - ../config/defaults.yml
+
+  pre_tasks:
+    - name: Load and validate the selected profile
+      ansible.builtin.import_tasks: load-profile.yml
+      tags: [always]
+
+    - name: Check for a profile pre-hook
+      ansible.builtin.stat:
+        path: "{{ machstrap_profile_root }}/hooks/pre.yml"
+      register: machstrap_pre_hook
+      delegate_to: localhost
+      become: false
+      tags: [always]
+
+    - name: Run the reviewed profile pre-hook
+      ansible.builtin.include_tasks: "{{ machstrap_profile_root }}/hooks/pre.yml"
+      when: machstrap_pre_hook.stat.isreg | default(false)
+      tags: [hooks]
+
+  roles:
+    - role: machstrap
+
+  post_tasks:
+    - name: Check for a profile post-hook
+      ansible.builtin.stat:
+        path: "{{ machstrap_profile_root }}/hooks/post.yml"
+      register: machstrap_post_hook
+      delegate_to: localhost
+      become: false
+      tags: [always]
+
+    - name: Run the reviewed profile post-hook
+      ansible.builtin.include_tasks: "{{ machstrap_profile_root }}/hooks/post.yml"
+      when: machstrap_post_hook.stat.isreg | default(false)
+      tags: [hooks]

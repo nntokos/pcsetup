@@ -1,0 +1,34 @@
+---
+# Safe macOS workstation starting point. Install Homebrew before requesting
+# brew or cask packages.
+machstrap_profile:
+  hostname:
+    computer_name: Machstrap Mac
+    local_hostname: machstrap-mac
+    hostname: machstrap-mac
+  packages:
+    apt: []
+    snap: []
+    brew: [git, ripgrep, tmux]
+    cask: []
+    pip: []
+  git_config: {init.defaultBranch: main}
+  git_repos: []
+  dotfiles: []
+  dotfile_sources: []
+  folder_sources: []
+  dotfiles_repo: {}
+  github_ssh: {enabled: false, email: "", key_type: ed25519}
+  ssh: {enabled: false, authorized_keys: [], allow_password: false, port: 22}
+  macos:
+    defaults:
+      - domain: NSGlobalDomain
+        key: AppleShowAllExtensions
+        value: true
+        type: bool
+    restart: [Finder]
+  commands: []
+  static_network: {enabled: false}
+  firewall: {configured: false}
+  wireguard: {enabled: false}
+  plex: {enabled: false}

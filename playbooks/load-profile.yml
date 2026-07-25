@@ -1,0 +1,46 @@
+---
+- name: Require wrapper-provided profile paths
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.env', 'MACHSTRAP_PROFILE_FILE') | length > 0
+      - lookup('ansible.builtin.env', 'MACHSTRAP_PROFILE_ROOT') | length > 0
+    fail_msg: Run this playbook through the machstrap wrapper.
+  delegate_to: localhost
+  run_once: true
+
+- name: Load the selected profile
+  ansible.builtin.include_vars:
+    file: "{{ lookup('ansible.builtin.env', 'MACHSTRAP_PROFILE_FILE') }}"
+    name: machstrap_profile_document
+
+- name: Validate the profile document root
+  ansible.builtin.assert:
+    that:
+      - machstrap_profile_document is mapping
+      - machstrap_profile_document.keys() | difference(['machstrap_profile']) | length == 0
+      - machstrap_profile_document.machstrap_profile is mapping
+    fail_msg: profile.yml must contain only a machstrap_profile mapping.
+
+- name: Validate inventory overrides
+  ansible.builtin.assert:
+    that:
+      - machstrap_overrides | default({}) is mapping
+      - machstrap_vault_overrides | default({}) is mapping
+    fail_msg: machstrap_overrides and machstrap_vault_overrides must be mappings.
+
+- name: Merge defaults, profile, and inventory overrides
+  ansible.builtin.set_fact:
+    machstrap: >-
+      {{
+        machstrap_defaults
+        | combine(machstrap_profile_document.machstrap_profile, recursive=true, list_merge='replace')
+        | combine(machstrap_overrides | default({}), recursive=true, list_merge='replace')
+        | combine(machstrap_vault_overrides | default({}), recursive=true, list_merge='replace')
+      }}
+    machstrap_profile_root: "{{ lookup('ansible.builtin.env', 'MACHSTRAP_PROFILE_ROOT') | realpath }}"
+    machstrap_home: "{{ ansible_facts.user_dir }}"
+    machstrap_is_linux: "{{ ansible_facts.system | default('') == 'Linux' }}"
+    machstrap_is_macos: "{{ ansible_facts.system | default('') == 'Darwin' }}"
+
+- name: Validate the merged configuration
+  ansible.builtin.include_tasks: ../roles/machstrap/tasks/validate.yml

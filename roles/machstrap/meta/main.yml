@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: machstrap
+  author: nntokos
+  description: Converge a workstation or server from a machstrap profile.
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies: []

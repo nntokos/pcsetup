@@ -1,0 +1,100 @@
+---
+- name: Define guarded static-network values
+  ansible.builtin.set_fact:
+    machstrap_network_interface: >-
+      {{ ansible_default_ipv4.interface
+         if machstrap.static_network.interface | default('auto') == 'auto'
+         else machstrap.static_network.interface }}
+    machstrap_network_gateway: >-
+      {{ ansible_default_ipv4.gateway
+         if machstrap.static_network.gateway | default('auto') == 'auto'
+         else machstrap.static_network.gateway }}
+    machstrap_network_matches: >-
+      {{ ansible_default_ipv4.network == (machstrap.static_network.only_on_subnet | split('/') | first)
+         and (ansible_default_ipv4.prefix | string) ==
+             (machstrap.static_network.only_on_subnet | split('/') | last) }}
+
+- name: Require Linux and a detected default IPv4 route
+  ansible.builtin.assert:
+    that:
+      - machstrap_is_linux
+      - ansible_default_ipv4.address is defined
+    fail_msg: Static networking requires Linux and a detected default IPv4 route.
+
+- name: Explain why static addressing is skipped
+  ansible.builtin.debug:
+    msg: >-
+      Keeping DHCP because the current network {{ ansible_default_ipv4.network }}
+      does not match {{ machstrap.static_network.only_on_subnet }}.
+  when: not machstrap_network_matches | bool
+
+- name: Install Netplan
+  ansible.builtin.apt:
+    name: netplan.io
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when: machstrap_network_matches | bool
+
+- name: Install and validate the guarded Netplan override
+  when: machstrap_network_matches | bool
+  become: true
+  block:
+    - name: Write the guarded Netplan override
+      ansible.builtin.copy:
+        dest: /etc/netplan/60-machstrap-static.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        backup: true
+        content: |
+          # Managed by machstrap
+          network:
+            version: 2
+            ethernets:
+              {{ machstrap_network_interface }}:
+                dhcp4: false
+                addresses:
+                  - {{ machstrap.static_network.address }}
+                routes:
+                  - to: default
+                    via: {{ machstrap_network_gateway }}
+                nameservers:
+                  addresses: {{ machstrap.static_network.dns | default([]) | to_json }}
+      register: machstrap_netplan
+
+    - name: Validate Netplan configuration
+      ansible.builtin.command: netplan generate
+      changed_when: false
+
+    - name: Apply the static address
+      ansible.builtin.command: netplan apply
+      when:
+        - machstrap.static_network.apply | default(true) | bool
+        - machstrap_netplan is changed
+        - not ansible_check_mode
+  rescue:
+    - name: Restore the prior managed Netplan file
+      ansible.builtin.copy:
+        src: "{{ machstrap_netplan.backup_file }}"
+        dest: /etc/netplan/60-machstrap-static.yaml
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: machstrap_netplan.backup_file is defined
+
+    - name: Remove a new invalid managed Netplan file
+      ansible.builtin.file:
+        path: /etc/netplan/60-machstrap-static.yaml
+        state: absent
+      when: machstrap_netplan.backup_file is not defined
+
+    - name: Reapply restored networking
+      ansible.builtin.command: netplan apply
+      when: not ansible_check_mode
+
+    - name: Stop after restoring networking
+      ansible.builtin.fail:
+        msg: The static network configuration was invalid and has been rolled back.

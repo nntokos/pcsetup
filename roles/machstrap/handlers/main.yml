@@ -1,0 +1,21 @@
+---
+- name: Restart SSH
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+  become: true
+
+- name: Restart WireGuard
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ wireguard_interface }}"
+    state: restarted
+  become: true
+  when: not ansible_check_mode
+
+- name: Restart Plex
+  ansible.builtin.systemd:
+    name: machstrap-plex
+    state: restarted
+    daemon_reload: true
+  become: true
+  when: not ansible_check_mode

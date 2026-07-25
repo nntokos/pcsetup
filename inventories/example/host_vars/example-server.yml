@@ -1,0 +1,9 @@
+---
+# Per-host, non-secret settings. Standard Ansible inventory precedence chooses
+# the final machstrap_overrides mapping, which is then merged over the profile.
+machstrap_overrides:
+  hostname:
+    hostname: example-server
+
+# Host-specific secrets can be placed in an encrypted file in this directory,
+# using a different filename and the `machstrap_vault_overrides` mapping.
