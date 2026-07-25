@@ -23,6 +23,16 @@ ok "shell syntax"
 "$REPO_ROOT/machstrap" --help > "$TEST_TMP/help"
 grep -q 'Init a new profile' "$TEST_TMP/help" || fail "init help text"
 grep -q 'profiles default' "$TEST_TMP/help" || fail "profiles help text"
+"$REPO_ROOT/machstrap" config --help > "$TEST_TMP/config-help"
+grep -q '^Usage: machstrap config' "$TEST_TMP/config-help" || fail "config command help"
+"$REPO_ROOT/machstrap" profiles --help > "$TEST_TMP/profiles-help"
+grep -q 'open NAME' "$TEST_TMP/profiles-help" || fail "profiles open help"
+"$REPO_ROOT/machstrap" init --help > "$TEST_TMP/init-help"
+grep -q -- '--no-edit' "$TEST_TMP/init-help" || fail "init command help"
+"$REPO_ROOT/machstrap" apply --help > "$TEST_TMP/apply-help"
+grep -q '^Usage: machstrap apply PROFILE' "$TEST_TMP/apply-help" || fail "apply command help"
+"$REPO_ROOT/machstrap" update --help > "$TEST_TMP/update-help"
+grep -q '^Usage: machstrap update|upgrade' "$TEST_TMP/update-help" || fail "update command help"
 ok "command help"
 
 grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' "$REPO_ROOT/VERSION" ||
@@ -60,15 +70,24 @@ XDG_CONFIG_HOME="$config_home" \
 status=$?
 set -e
 [[ "$status" -eq 2 ]] || fail "unknown profiles command status"
-grep -q 'usage: machstrap profiles list|default' \
+grep -q 'usage: machstrap profiles list|default|open PROFILE' \
     "$TEST_TMP/unknown-profiles-output" || fail "profiles subcommand usage"
 ok "profile commands work without config or Ansible"
 
 XDG_CONFIG_HOME="$config_home" \
-    "$REPO_ROOT/machstrap" config "$profile_root" >"$TEST_TMP/config-set"
+    "$REPO_ROOT/machstrap" config "$profile_root" >"$TEST_TMP/config-set" 2>"$TEST_TMP/config-set-stderr"
 profile_root_real="$(cd "$profile_root" && pwd -P)"
 grep -qx "$profile_root_real" "$TEST_TMP/config-set" ||
     fail "config did not print canonical profile directory"
+grep -Fq "successfully set the Machstrap profile directory to: $profile_root_real" \
+    "$TEST_TMP/config-set-stderr" || fail "config success message"
+for default_profile in full-example linux-server linux-workstation macos-workstation; do
+    [[ -f "$profile_root/$default_profile/profile.yml" ]] ||
+        fail "config did not copy bundled profile: $default_profile"
+done
+[[ -f "$profile_root/inventories/hosts.yml" ]] || fail "config did not copy inventory template"
+[[ -f "$profile_root/inventories/group_vars/all.yml" ]] || fail "config inventory group vars missing"
+[[ -f "$profile_root/inventories/host_vars/example-server.yml" ]] || fail "config inventory host vars missing"
 [[ "$(mode_of "$config_home/machstrap")" == 700 ]] ||
     fail "config directory mode"
 [[ "$(mode_of "$config_home/machstrap/config")" == 600 ]] ||
@@ -82,9 +101,8 @@ grep -q '^  alpha ' "$TEST_TMP/configured-profiles" ||
     fail "configured profiles missing alpha"
 grep -q 'linux-server.*overrides default' "$TEST_TMP/configured-profiles" ||
     fail "configured profile override marker"
-if grep -q '^  macos-workstation ' "$TEST_TMP/configured-profiles"; then
-    fail "configured profiles included a bundled-only profile"
-fi
+grep -q '^  macos-workstation ' "$TEST_TMP/configured-profiles" ||
+    fail "configured profiles missing seeded bundled profile"
 ok "optional profile config and configured listing"
 
 XDG_CONFIG_HOME="$config_home" \
@@ -220,7 +238,7 @@ grep -qx "$profile_root_real/alpha/profile.yml" \
     fail "configured bare profile was not resolved"
 configured_init="$TEST_TMP/configured-init"
 XDG_CONFIG_HOME="$config_home" \
-    "$REPO_ROOT/machstrap" init "$configured_init" --preset alpha
+    "$REPO_ROOT/machstrap" init "$configured_init" --preset alpha --no-edit
 cmp "$profile_root/alpha/profile.yml" "$configured_init/profile.yml" ||
     fail "configured preset was not copied"
 ok "configured profile resolution and preset init"
@@ -373,7 +391,7 @@ mkdir -p "$install_source"
 cp "$REPO_ROOT/install.sh" "$REPO_ROOT/machstrap" \
     "$REPO_ROOT/VERSION" "$REPO_ROOT/ansible.cfg" "$install_source/"
 cp -R "$REPO_ROOT/config" "$REPO_ROOT/playbooks" "$REPO_ROOT/roles" \
-    "$REPO_ROOT/profiles" "$install_source/"
+    "$REPO_ROOT/profiles" "$REPO_ROOT/inventories" "$install_source/"
 PATH="$TEST_TMP/bin:$PATH" \
     "$install_source/install.sh" --prefix "$install_prefix" \
     >"$TEST_TMP/install-output" 2>&1
@@ -394,6 +412,8 @@ XDG_CONFIG_HOME="$config_home" \
     >"$TEST_TMP/installed-default-profiles"
 grep -q '^  full-example ' "$TEST_TMP/installed-default-profiles" ||
     fail "installed runtime cannot list default profiles"
+[[ -f "$install_prefix/share/machstrap/inventories/example/hosts.yml" ]] ||
+    fail "installed runtime lacks inventory template"
 XDG_CONFIG_HOME="$config_home" \
     "$install_prefix/bin/machstrap" profiles list \
     >"$TEST_TMP/installed-configured-profiles"
@@ -487,7 +507,7 @@ cp "$REPO_ROOT/install.sh" "$REPO_ROOT/machstrap" \
     "$REPO_ROOT/VERSION" "$REPO_ROOT/ansible.cfg" \
     "$REPO_ROOT/README.md" "$update_seed/"
 cp -R "$REPO_ROOT/config" "$REPO_ROOT/playbooks" "$REPO_ROOT/roles" \
-    "$REPO_ROOT/profiles" "$update_seed/"
+    "$REPO_ROOT/profiles" "$REPO_ROOT/inventories" "$update_seed/"
 git -C "$update_seed" add .
 git -C "$update_seed" commit -m initial >/dev/null
 git -C "$update_seed" remote add origin "$update_origin"
@@ -498,7 +518,7 @@ git -C "$update_seed" add machstrap
 git -C "$update_seed" commit -m update >/dev/null
 git -C "$update_seed" push origin main >/dev/null
 PATH="$TEST_TMP/bin:$PATH" \
-    "$update_checkout/install.sh" --update --prefix "$update_prefix" \
+    "$update_checkout/machstrap" upgrade --prefix "$update_prefix" \
     >"$TEST_TMP/update-output" 2>&1
 grep -q 'machstrap update test marker' "$update_checkout/machstrap" ||
     fail "update did not fast-forward the source checkout"

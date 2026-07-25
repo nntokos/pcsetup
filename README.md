@@ -38,11 +38,16 @@ never invokes `sudo` and never installs operating-system packages. Re-run the
 same command to upgrade the owned runtime. It refuses to replace unrelated
 files or an installation without Machstrap's ownership marker.
 
-To fetch and install new changes from `main`:
+From a source checkout, fetch and install new changes from `main`:
 
 ```bash
-./install.sh --update
+./machstrap update
 ```
+
+`machstrap upgrade` is an alias. The command delegates to the installer, so
+it is available only from a checkout; installed runtimes are self-contained
+and do not retain a Git source to update. You may still use
+`./install.sh --update` from a checkout.
 
 Update uses the checkout's configured `origin`, fetches only `main` without
 tags, requires the checkout itself to be on a clean `main` branch, and accepts
@@ -80,6 +85,9 @@ Show the running version:
 ```bash
 machstrap --version
 ```
+
+Use `machstrap COMMAND --help` to see options for an individual command, such
+as `machstrap config --help`.
 
 ## Start safely
 
@@ -193,6 +201,13 @@ machstrap profiles list
 machstrap check my-machine --local
 ```
 
+Open a profile for editing with the system editor (`$VISUAL`, then `$EDITOR`,
+then `vi`):
+
+```bash
+machstrap profiles open my-machine
+```
+
 The configured directory contains immediate profile directories such as
 `~/machine-configs/my-machine/profile.yml`. It is only a convenience hint:
 explicit profile paths and shipped defaults continue to work without it. A
@@ -208,7 +223,10 @@ machstrap config --unset
 
 Machstrap creates its config directory as `0700` and the file as `0600`. The
 selected profile directory must already exist and must not be group- or
-world-writable; Machstrap never creates or changes that directory.
+world-writable. On the first `machstrap config PATH`, Machstrap copies any
+missing bundled profile directories into `PATH` and creates
+`PATH/inventories/` from `inventories/example/`. Existing profiles and an
+existing inventory directory are preserved without modification.
 
 `profiles list` shows only configured profiles. `profiles default` shows only
 the presets included with the active Machstrap runtime. A configured profile
@@ -220,6 +238,10 @@ Create the fully commented starter:
 ```bash
 machstrap init ~/machine-configs/my-machine
 ```
+
+When run from a terminal, `init` opens the new `profile.yml` in `$VISUAL`,
+then `$EDITOR`, or `vi`. Use `--no-edit` for scripts or when you only want to
+create the scaffold; non-interactive runs do not start an editor.
 
 Or start from a preset:
 

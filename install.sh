@@ -96,7 +96,7 @@ cleanup_install() {
 }
 
 validate_source() {
-    for entry in machstrap VERSION ansible.cfg config playbooks roles profiles; do
+    for entry in machstrap VERSION ansible.cfg config playbooks roles profiles inventories; do
         [ -e "$SOURCE_DIR/$entry" ] || {
             err "installation source is incomplete: missing $entry"
             return 1
@@ -107,7 +107,7 @@ validate_source() {
         fi
     done
     linked=$(find "$SOURCE_DIR/config" "$SOURCE_DIR/playbooks" \
-        "$SOURCE_DIR/roles" "$SOURCE_DIR/profiles" -type l -print -quit)
+        "$SOURCE_DIR/roles" "$SOURCE_DIR/profiles" "$SOURCE_DIR/inventories" -type l -print -quit)
     [ -z "$linked" ] || {
         err "installation source contains a symbolic link: $linked"
         return 1
@@ -199,7 +199,7 @@ install_runtime() {
     cp "$SOURCE_DIR/machstrap" "$SOURCE_DIR/VERSION" \
         "$SOURCE_DIR/ansible.cfg" "$STAGE/"
     cp -R "$SOURCE_DIR/config" "$SOURCE_DIR/playbooks" "$SOURCE_DIR/roles" \
-        "$SOURCE_DIR/profiles" "$STAGE/"
+        "$SOURCE_DIR/profiles" "$SOURCE_DIR/inventories" "$STAGE/"
     chmod 755 "$STAGE/machstrap"
     printf '%s\n' "$INSTALL_MARKER" > "$STAGE/.machstrap-install"
 

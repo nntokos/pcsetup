@@ -208,10 +208,12 @@ usage() {
 Usage:
   machstrap --version
   machstrap doctor
+  machstrap update|upgrade [--prefix PATH]
   machstrap config [PATH|--unset]
   machstrap profiles list
   machstrap profiles default
-  machstrap init DEST [--preset PRESET] [--force]
+  machstrap profiles open PROFILE
+  machstrap init DEST [--preset PRESET] [--force] [--no-edit]
   machstrap check PROFILE [target options]
   machstrap apply PROFILE|FILE.machstrap [target options]
   machstrap bundle PROFILE --out FILE.machstrap [--force]
@@ -219,10 +221,12 @@ Usage:
 Commands:
   --version                           Print the installed Machstrap version
   doctor                              Check controller prerequisites
+  update, upgrade                     Fast-forward a source checkout and reinstall it
   config                              Set, show, or unset the optional profile directory
   profiles list                       List profiles from the configured directory
   profiles default                    List profiles shipped with machstrap
-  init                                Init a new profile
+  profiles open                       Open a profile in the configured editor
+  init                                Init a new profile and open it in an editor
   check                               Validate a profile without changing targets
   apply                               Apply or dry-run a profile
   bundle                              Build a portable profile archive
@@ -253,6 +257,100 @@ PROFILE is either a directory containing profile.yml, a profile.yml path, or
 a bare name from the optional configured directory or this runtime's bundled
 profiles/ directory.
 EOF
+}
+
+config_usage() {
+    cat <<'EOF'
+Usage: machstrap config [PATH|--unset]
+
+Show the configured profile directory, set it to PATH, or remove it.
+PATH must be an existing, user-readable directory that is not group- or
+world-writable.
+EOF
+}
+
+profiles_usage() {
+    cat <<'EOF'
+Usage: machstrap profiles list|default|open PROFILE
+
+  list       List profiles in the configured profile directory
+  default    List profiles included with the active Machstrap runtime
+  open NAME  Open a configured or bundled profile in the system editor
+EOF
+}
+
+init_usage() {
+    cat <<'EOF'
+Usage: machstrap init DEST [--preset PRESET] [--force] [--no-edit]
+
+Create a profile at DEST from the fully commented full-example preset, or a
+named preset. In an interactive terminal, profile.yml opens in $VISUAL,
+$EDITOR, or vi unless --no-edit is used.
+
+  --preset PRESET  Use a bundled or configured preset (default: full-example)
+  --force          Copy only into an existing empty DEST directory
+  --no-edit        Do not open profile.yml after creation
+EOF
+}
+
+bundle_usage() {
+    cat <<'EOF'
+Usage: machstrap bundle PROFILE --out FILE.machstrap [--force]
+
+Create a self-contained, portable archive of PROFILE and the active runtime.
+
+  --out FILE.machstrap  Destination archive path (required)
+  --force               Replace an existing archive
+EOF
+}
+
+run_usage() {
+    local action="$1"
+    cat <<EOF
+Usage: machstrap $action PROFILE [target options] [execution options]
+
+Target options (choose one):
+  --local, --here
+  --inventory PATH --limit PATTERN
+  --inventory PATH --all
+  --host HOST [--user USER] [--port PORT] [--identity PATH] [--ssh-config PATH]
+
+Execution options:
+  --dry-run, --check  Preview changes without applying them
+  --diff
+  --ask-become-pass
+  --ask-vault-pass
+  --vault-password-file PATH
+  --tags TAGS
+  --skip-tags TAGS
+  -v, -vv, -vvv, -vvvv
+EOF
+}
+
+update_usage() {
+    cat <<'EOF'
+Usage: machstrap update|upgrade [--prefix PATH]
+
+Fast-forward the clean main checkout containing this command from its origin,
+then reinstall it. This command is available only from a source checkout; an
+installed self-contained runtime has no Git checkout to update.
+
+  --prefix PATH  Install updated Machstrap under PATH (default: $HOME/.local)
+EOF
+}
+
+update_command() {
+    local installer
+    if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then
+        update_usage
+        return
+    fi
+    installer="$RUNTIME_ROOT/install.sh"
+    if [[ ! -f "$installer" || -L "$installer" || ! -x "$installer" ]]; then
+        err "update requires a source checkout; run ./install.sh --update from the checkout instead"
+        return 1
+    fi
+    exec "$installer" --update "$@"
 }
 
 command_exists() {
@@ -592,19 +690,19 @@ validate_port() {
 config_set_profile_root() {
     local requested="$1" canonical old_umask temp
     contains_control_characters "$requested" && {
-        err "profile directory contains control characters"
+        err "could not set the Machstrap profile directory: path contains control characters"
         return 2
     }
     canonical="$(canonical_directory "$requested")" || {
-        err "profile directory not found: $requested"
+        err "could not set the Machstrap profile directory: directory not found: $requested"
         return 1
     }
     profile_root_safe "$canonical" || {
-        err "profile directory must be readable, searchable, and not group/world writable: $canonical"
+        err "could not set the Machstrap profile directory: it must be readable, searchable, and not group/world writable: $canonical"
         return 1
     }
     config_locations || {
-        err "HOME or XDG_CONFIG_HOME must resolve to an absolute path"
+        err "could not set the Machstrap profile directory: HOME or XDG_CONFIG_HOME must resolve to an absolute path"
         return 1
     }
 
@@ -612,37 +710,82 @@ config_set_profile_root() {
     umask 077
     mkdir -p "$MACHSTRAP_CONFIG_DIR" || {
         umask "$old_umask"
-        err "could not create config directory: $MACHSTRAP_CONFIG_DIR"
+        err "could not set the Machstrap profile directory: could not create config directory: $MACHSTRAP_CONFIG_DIR"
         return 1
     }
     umask "$old_umask"
     secure_owned_config_path "$MACHSTRAP_CONFIG_DIR" directory 700 || {
-        err "config directory must be user-owned, mode 0700, and not a symlink: $MACHSTRAP_CONFIG_DIR"
+        err "could not set the Machstrap profile directory: config directory must be user-owned, mode 0700, and not a symlink: $MACHSTRAP_CONFIG_DIR"
         return 1
     }
     if [[ -e "$MACHSTRAP_CONFIG_FILE" || -L "$MACHSTRAP_CONFIG_FILE" ]]; then
         secure_owned_config_path "$MACHSTRAP_CONFIG_FILE" file 600 || {
-            err "refusing to replace unsafe config file: $MACHSTRAP_CONFIG_FILE"
+            err "could not set the Machstrap profile directory: refusing to replace unsafe config file: $MACHSTRAP_CONFIG_FILE"
             return 1
         }
     fi
 
+    bootstrap_configured_content "$canonical" || return 1
+
     temp="$MACHSTRAP_CONFIG_DIR/.config.$$"
     [[ ! -e "$temp" && ! -L "$temp" ]] || {
-        err "temporary config path already exists: $temp"
+        err "could not set the Machstrap profile directory: temporary config path already exists: $temp"
         return 1
     }
     if ! (umask 077; printf '%s\n' "$canonical" > "$temp"); then
         rm -f -- "$temp"
-        err "could not write temporary config file"
+        err "could not set the Machstrap profile directory: could not write temporary config file"
         return 1
     fi
     if ! mv -f -- "$temp" "$MACHSTRAP_CONFIG_FILE"; then
         rm -f -- "$temp"
-        err "could not install config file"
+        err "could not set the Machstrap profile directory: could not install config file"
         return 1
     fi
     printf '%s\n' "$canonical"
+    info "successfully set the Machstrap profile directory to: $canonical"
+}
+
+bootstrap_configured_content() {
+    local root="$1" source destination name
+    [[ -d "$RUNTIME_ROOT/profiles" && ! -L "$RUNTIME_ROOT/profiles" ]] || {
+        err "could not bootstrap the Machstrap profile directory: bundled profiles are unavailable"
+        return 1
+    }
+    [[ -d "$RUNTIME_ROOT/inventories/example" && ! -L "$RUNTIME_ROOT/inventories/example" ]] || {
+        err "could not bootstrap the Machstrap profile directory: bundled inventory template is unavailable"
+        return 1
+    }
+    if find "$RUNTIME_ROOT/profiles" "$RUNTIME_ROOT/inventories/example" -type l -print -quit | grep -q .; then
+        err "could not bootstrap the Machstrap profile directory: bundled templates contain symbolic links"
+        return 1
+    fi
+
+    for source in "$RUNTIME_ROOT/profiles"/*; do
+        [[ -d "$source" && ! -L "$source" && -f "$source/profile.yml" && ! -L "$source/profile.yml" ]] || continue
+        name="$(basename "$source")"
+        destination="$root/$name"
+        if [[ -e "$destination" || -L "$destination" ]]; then
+            info "preserved existing profile: $destination"
+        else
+            cp -R "$source" "$destination" || {
+                err "could not bootstrap the Machstrap profile directory: failed to copy profile: $name"
+                return 1
+            }
+            info "copied bundled profile: $destination"
+        fi
+    done
+
+    destination="$root/inventories"
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        info "preserved existing inventory directory: $destination"
+    else
+        cp -R "$RUNTIME_ROOT/inventories/example" "$destination" || {
+            err "could not bootstrap the Machstrap profile directory: failed to copy the inventory template"
+            return 1
+        }
+        info "copied inventory template: $destination"
+    fi
 }
 
 config_unset_profile_root() {
@@ -650,7 +793,10 @@ config_unset_profile_root() {
         err "HOME or XDG_CONFIG_HOME must resolve to an absolute path"
         return 1
     }
-    [[ -e "$MACHSTRAP_CONFIG_FILE" || -L "$MACHSTRAP_CONFIG_FILE" ]] || return 0
+    if [[ ! -e "$MACHSTRAP_CONFIG_FILE" && ! -L "$MACHSTRAP_CONFIG_FILE" ]]; then
+        info "no Machstrap profile directory was configured; nothing to unset"
+        return 0
+    fi
     secure_owned_config_path "$MACHSTRAP_CONFIG_DIR" directory 700 || {
         err "refusing to use unsafe config directory: $MACHSTRAP_CONFIG_DIR"
         return 1
@@ -660,18 +806,24 @@ config_unset_profile_root() {
         return 1
     }
     rm -f -- "$MACHSTRAP_CONFIG_FILE"
+    info "successfully unset the Machstrap profile directory"
 }
 
 config_command() {
+    if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then
+        config_usage
+        return
+    fi
     if (( $# == 0 )); then
         if load_configured_profile_root; then
             printf '%s\n' "$CONFIGURED_PROFILE_ROOT"
+            info "Machstrap profile directory: $CONFIGURED_PROFILE_ROOT"
             return 0
         fi
         if [[ "$MACHSTRAP_CONFIG_STATE" == missing ]]; then
-            err "no profile directory is configured"
+            err "no Machstrap profile directory is configured; set one with: machstrap config PATH"
         else
-            err "the configured profile directory is invalid"
+            err "the configured Machstrap profile directory is invalid; set a valid one with: machstrap config PATH"
         fi
         return 1
     fi
@@ -738,13 +890,14 @@ render_profile_records() {
 }
 
 profiles_command() {
-    local subcommand="${1:-}" records
-    (( $# == 1 )) || {
-        err "usage: machstrap profiles list|default"
-        return 2
-    }
+    local subcommand="${1:-}" profile records
+    if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then
+        profiles_usage
+        return
+    fi
     case "$subcommand" in
         list)
+            (( $# == 1 )) || { err "usage: machstrap profiles list"; return 2; }
             load_configured_profile_root >/dev/null || true
             if [[ -z "$CONFIGURED_PROFILE_ROOT" ]]; then
                 printf 'No profile directory configured. Run: machstrap config PATH\n'
@@ -755,24 +908,37 @@ profiles_command() {
             render_profile_records "$records"
             ;;
         default)
+            (( $# == 1 )) || { err "usage: machstrap profiles default"; return 2; }
             records="$(profile_records "$RUNTIME_ROOT/profiles" false)"
             printf 'Default profiles:\n'
             render_profile_records "$records"
             ;;
+        open)
+            (( $# == 2 )) || { err "usage: machstrap profiles open PROFILE"; return 2; }
+            profile="$2"
+            [[ -t 0 && -t 1 ]] || {
+                err "profiles open requires an interactive terminal"
+                return 1
+            }
+            resolve_profile "$profile"
+            open_profile_editor "$MACHSTRAP_PROFILE_FILE"
+            ;;
         *)
             err "unknown profiles command: $subcommand"
-            err "usage: machstrap profiles list|default"
+            err "usage: machstrap profiles list|default|open PROFILE"
             return 2
             ;;
     esac
 }
 
 init_profile() {
-    local destination="" preset="full-example" force=false source configured
+    local destination="" preset="full-example" force=false edit=true source configured
     while (( $# )); do
         case "$1" in
+            --help|-h) init_usage; return ;;
             --preset) [[ $# -ge 2 ]] || { err "--preset requires a value"; return 2; }; preset="$2"; shift 2 ;;
             --force) force=true; shift ;;
+            --no-edit) edit=false; shift ;;
             -*) err "unknown init option: $1"; return 2 ;;
             *) [[ -z "$destination" ]] || { err "init accepts one destination"; return 2; }; destination="$1"; shift ;;
         esac
@@ -803,6 +969,26 @@ init_profile() {
     mkdir -p -- "$destination"
     cp -R "$source/." "$destination/"
     info "created profile: $destination"
+    if [[ "$edit" == true && -t 0 && -t 1 ]]; then
+        open_profile_editor "$destination/profile.yml" || true
+    fi
+}
+
+open_profile_editor() {
+    local profile_file="$1" editor
+    local -a editor_command
+
+    editor="${VISUAL:-${EDITOR:-vi}}"
+    read -r -a editor_command <<< "$editor"
+    if (( ${#editor_command[@]} == 0 )) || ! command_exists "${editor_command[0]}"; then
+        warn "could not open profile; the configured editor is unavailable: $editor"
+        return 1
+    fi
+    info "opening profile in editor: $profile_file"
+    "${editor_command[@]}" "$profile_file" || {
+        warn "could not open profile; the editor exited unsuccessfully"
+        return 1
+    }
 }
 
 check_profile_tree() {
@@ -846,6 +1032,7 @@ bundle_create() {
     local profile="" output="" force=false staging bundle_root
     while (( $# )); do
         case "$1" in
+            --help|-h) bundle_usage; return ;;
             --out|-o) [[ $# -ge 2 ]] || { err "--out requires a value"; return 2; }; output="$2"; shift 2 ;;
             --force) force=true; shift ;;
             -*) err "unknown bundle option: $1"; return 2 ;;
@@ -1076,11 +1263,16 @@ main() {
     case "$command" in
         --version) [[ $# -eq 0 ]] || { err "--version accepts no arguments"; return 2; }; version_command ;;
         doctor) [[ $# -eq 0 ]] || { err "doctor accepts no arguments"; return 2; }; doctor ;;
+        update|upgrade) update_command "$@" ;;
         config) config_command "$@" ;;
         profiles) profiles_command "$@" ;;
         init) init_profile "$@" ;;
         bundle) bundle_create "$@" ;;
         check|apply)
+            if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then
+                run_usage "$command"
+                return
+            fi
             [[ $# -ge 1 ]] || { err "$command requires a profile or bundle"; return 2; }
             local profile="$1"
             shift
