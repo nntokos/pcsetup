@@ -44,16 +44,23 @@ From a source checkout, fetch and install new changes from `main`:
 ./machstrap update
 ```
 
-`machstrap upgrade` is an alias. The command delegates to the installer, so
-it is available only from a checkout; installed runtimes are self-contained
-and do not retain a Git source to update. You may still use
-`./install.sh --update` from a checkout.
+`machstrap upgrade` is an alias. The command fetches `origin/main`,
+fast-forwards the checkout when Git can do so safely, then runs the local
+installer. It is available only from a checkout; installed runtimes are
+self-contained and do not retain a Git source to fetch from.
 
-Update uses the checkout's configured `origin`, fetches only `main` without
-tags, requires the checkout itself to be on a clean `main` branch, and accepts
-only a fast-forward. It then re-executes the newly fetched installer and
-upgrades the selected prefix. Source archives have no remote metadata, so they
-can reinstall their current contents but cannot use `--update`.
+To install the contents of the current local checkout without contacting a
+remote, run:
+
+```bash
+./install.sh --update
+```
+
+`machstrap update` uses the checkout's configured `origin`, fetches only
+`main` without tags, and accepts only a fast-forward. Non-conflicting local
+changes are preserved; Git refuses an update that would overwrite them.
+`install.sh --update` does not contact a remote and works for source archives
+as well.
 
 Remove the Machstrap selected by the current `PATH`:
 
@@ -186,6 +193,13 @@ my-profile/
 │   └── post.yml
 └── scripts/
 ```
+
+The fully commented starter includes harmless `hooks/pre.yml` and
+`hooks/post.yml` examples. They run on every selected target before and after
+the Machstrap role, respectively; replace them with reviewed, idempotent tasks
+or delete them when they are not needed. Its post-hook invokes the included
+`scripts/example-post-hook.sh`, showing how to run a reviewed profile-local
+script.
 
 Show the profiles shipped with Machstrap:
 

@@ -85,9 +85,14 @@ for default_profile in full-example linux-server linux-workstation macos-worksta
     [[ -f "$profile_root/$default_profile/profile.yml" ]] ||
         fail "config did not copy bundled profile: $default_profile"
 done
+[[ -f "$profile_root/full-example/hooks/pre.yml" ]] || fail "config did not copy pre-hook example"
+[[ -f "$profile_root/full-example/hooks/post.yml" ]] || fail "config did not copy post-hook example"
+[[ -x "$profile_root/full-example/scripts/example-post-hook.sh" ]] ||
+    fail "config did not copy executable post-hook script"
 [[ -f "$profile_root/inventories/hosts.yml" ]] || fail "config did not copy inventory template"
 [[ -f "$profile_root/inventories/group_vars/all.yml" ]] || fail "config inventory group vars missing"
 [[ -f "$profile_root/inventories/host_vars/example-server.yml" ]] || fail "config inventory host vars missing"
+[[ -f "$profile_root/inventories/host_vars/example-mac.yml" ]] || fail "config inventory macOS host vars missing"
 [[ "$(mode_of "$config_home/machstrap")" == 700 ]] ||
     fail "config directory mode"
 [[ "$(mode_of "$config_home/machstrap/config")" == 600 ]] ||
@@ -193,6 +198,14 @@ PLAY RECAP *********************************************************************
 localhost                  : ok=2 changed=1 unreachable=0 failed=0 skipped=4 rescued=0 ignored=0
 EVENTS
 fi
+if [[ "${MACHSTRAP_TEST_NO_HOSTS:-}" == 1 ]]; then
+    cat <<'NO_HOSTS'
+[WARNING]: Could not match supplied host pattern, ignoring: missing-host
+
+PLAY [Validate a machstrap profile without changing targets] *******************
+skipping: no hosts matched
+NO_HOSTS
+fi
 if [[ "${MACHSTRAP_TEST_FAIL:-}" == 1 ]]; then
     cat <<'FAILURE'
 TASK [Fail safely] ************************************************************
@@ -228,6 +241,19 @@ PATH="$TEST_TMP/bin:$PATH" \
 grep -q '/playbooks/validate.yml' "$TEST_TMP/args" || fail "check playbook selection"
 grep -qx 'localhost,' "$TEST_TMP/args" || fail "local inventory"
 ok "wrapper invokes validation safely"
+
+set +e
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/no-hosts-args" MACHSTRAP_TEST_NO_HOSTS=1 \
+PATH="$TEST_TMP/bin:$PATH" \
+    "$REPO_ROOT/machstrap" check full-example \
+    --inventory "$REPO_ROOT/inventories/example/hosts.yml" --limit missing-host \
+    >"$TEST_TMP/no-hosts-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "empty inventory selection did not fail"
+grep -q 'target selection matched no hosts' "$TEST_TMP/no-hosts-output" ||
+    fail "empty inventory selection diagnostic"
+ok "empty inventory selection is rejected"
 
 MACHSTRAP_TEST_CAPTURE="$TEST_TMP/configured-profile-args" \
 MACHSTRAP_TEST_PROFILE_CAPTURE="$TEST_TMP/configured-profile-path" \
@@ -400,6 +426,12 @@ install_prefix_real="$(cd "$install_prefix" && pwd -P)"
 [[ -f "$install_prefix/share/machstrap/.machstrap-install" ]] ||
     fail "installation ownership marker missing"
 grep -q 'export PATH=' "$TEST_TMP/install-output" || fail "missing PATH guidance"
+printf '\n# local installer update marker\n' >>"$install_source/machstrap"
+PATH="$TEST_TMP/bin:$PATH" \
+    "$install_source/install.sh" --update --prefix "$install_prefix" \
+    >"$TEST_TMP/local-update-output" 2>&1
+grep -q 'local installer update marker' "$install_prefix/share/machstrap/machstrap" ||
+    fail "installer update did not use the current local source"
 rm -rf "$install_source"
 "$install_prefix/bin/machstrap" --help >"$TEST_TMP/installed-help"
 grep -q 'Init a new profile' "$TEST_TMP/installed-help" ||
@@ -528,16 +560,18 @@ grep -q 'machstrap update test marker' \
 grep -q 'source updated to' "$TEST_TMP/update-output" ||
     fail "update completion diagnostic"
 printf '\nlocal change\n' >>"$update_checkout/README.md"
-set +e
+printf '\n# second machstrap update test marker\n' >>"$update_seed/machstrap"
+git -C "$update_seed" add machstrap
+git -C "$update_seed" commit -m second-update >/dev/null
+git -C "$update_seed" push origin main >/dev/null
 PATH="$TEST_TMP/bin:$PATH" \
-    "$update_checkout/install.sh" --update --prefix "$update_prefix" \
+    "$update_checkout/machstrap" upgrade --prefix "$update_prefix" \
     >"$TEST_TMP/dirty-update-output" 2>&1
-update_status=$?
-set -e
-[[ "$update_status" -ne 0 ]] || fail "update accepted a dirty checkout"
-grep -q 'checkout with local changes' "$TEST_TMP/dirty-update-output" ||
-    fail "dirty update diagnostic"
-ok "secure main fast-forward update"
+grep -q 'second machstrap update test marker' "$update_checkout/machstrap" ||
+    fail "update did not fast-forward a dirty checkout"
+grep -q 'local change' "$update_checkout/README.md" ||
+    fail "update did not preserve a non-conflicting local change"
+ok "main fast-forward update preserves non-conflicting local changes"
 
 MACHSTRAP_PREFIX="$TEST_TMP/quickstart-prefix" PATH="$TEST_TMP/bin:$PATH" \
     "$REPO_ROOT/quickstart.sh" >"$TEST_TMP/quickstart-output" 2>&1

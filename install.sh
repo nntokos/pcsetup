@@ -25,8 +25,8 @@ Usage:
   ./install.sh --uninstall [--prefix PATH]
 
 The default prefix is $HOME/.local. Re-running the installer upgrades an
-installation from the current source. --update first fast-forwards a clean
-main checkout from its configured origin.
+installation from the current source. --update is an explicit alias for that
+local upgrade; it does not contact Git remotes.
 EOF
 }
 
@@ -112,51 +112,6 @@ validate_source() {
         err "installation source contains a symbolic link: $linked"
         return 1
     }
-}
-
-update_source() {
-    command -v git >/dev/null 2>&1 || {
-        err "git is required for --update"
-        return 1
-    }
-    git -C "$SOURCE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
-        err "--update requires a Git checkout; source archives can only reinstall their current version"
-        return 1
-    }
-    repository=$(git -C "$SOURCE_DIR" rev-parse --show-toplevel)
-    repository=$(CDPATH= cd -P "$repository" && pwd)
-    [ "$repository" = "$SOURCE_DIR" ] || {
-        err "install.sh must be run from the root of its Git checkout"
-        return 1
-    }
-    branch=$(git -C "$SOURCE_DIR" symbolic-ref --quiet --short HEAD || true)
-    [ "$branch" = main ] || {
-        err "--update requires the checkout's main branch (current: ${branch:-detached HEAD})"
-        return 1
-    }
-    [ -z "$(git -C "$SOURCE_DIR" status --porcelain --untracked-files=normal)" ] || {
-        err "refusing to update a checkout with local changes"
-        return 1
-    }
-    git -C "$SOURCE_DIR" remote get-url origin >/dev/null 2>&1 || {
-        err "--update requires a configured origin remote"
-        return 1
-    }
-
-    info "fetching main from origin"
-    git -C "$SOURCE_DIR" fetch --quiet --no-tags origin main
-    git -C "$SOURCE_DIR" merge-base --is-ancestor HEAD FETCH_HEAD || {
-        err "origin/main cannot fast-forward the current checkout"
-        return 1
-    }
-    git -C "$SOURCE_DIR" merge --quiet --ff-only FETCH_HEAD
-    [ -f "$SOURCE_DIR/install.sh" ] && [ -x "$SOURCE_DIR/install.sh" ] &&
-        [ ! -L "$SOURCE_DIR/install.sh" ] || {
-        err "the updated checkout does not contain a safe install.sh"
-        return 1
-    }
-    info "source updated to $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
-    exec "$SOURCE_DIR/install.sh" --prefix "$PREFIX"
 }
 
 install_runtime() {
@@ -326,6 +281,6 @@ done
 normalize_prefix "$PREFIX"
 case "$MODE" in
     uninstall) uninstall_runtime ;;
-    update) update_source ;;
+    update) install_runtime ;;
     install) install_runtime ;;
 esac

@@ -1,6 +1,11 @@
 ---
 # Per-host, non-secret settings. Standard Ansible inventory precedence chooses
 # the final machstrap_overrides mapping, which is then merged over the profile.
+# Standalone variables are available to profile templates and hooks. Keep
+# custom values such as paths outside `machstrap_overrides` unless they are a
+# documented Machstrap profile setting.
+media_root: /srv/media
+
 machstrap_overrides:
   hostname:
     hostname: example-server

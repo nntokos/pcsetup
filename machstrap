@@ -331,16 +331,16 @@ update_usage() {
     cat <<'EOF'
 Usage: machstrap update|upgrade [--prefix PATH]
 
-Fast-forward the clean main checkout containing this command from its origin,
+Fetch and fast-forward the main checkout containing this command from origin,
 then reinstall it. This command is available only from a source checkout; an
-installed self-contained runtime has no Git checkout to update.
+installed self-contained runtime has no Git checkout to fetch from.
 
   --prefix PATH  Install updated Machstrap under PATH (default: $HOME/.local)
 EOF
 }
 
 update_command() {
-    local installer
+    local installer repository branch
     if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then
         update_usage
         return
@@ -350,6 +350,34 @@ update_command() {
         err "update requires a source checkout; run ./install.sh --update from the checkout instead"
         return 1
     fi
+    command_exists git || { err "update requires git"; return 1; }
+    git -C "$RUNTIME_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+        err "update requires a Git checkout"
+        return 1
+    }
+    repository="$(git -C "$RUNTIME_ROOT" rev-parse --show-toplevel)"
+    repository="$(canonical_directory "$repository")" || return 1
+    [[ "$repository" == "$RUNTIME_ROOT" ]] || {
+        err "update must be run from the root of its Git checkout"
+        return 1
+    }
+    branch="$(git -C "$RUNTIME_ROOT" symbolic-ref --quiet --short HEAD || true)"
+    [[ "$branch" == main ]] || {
+        err "update requires the checkout's main branch (current: ${branch:-detached HEAD})"
+        return 1
+    }
+    git -C "$RUNTIME_ROOT" remote get-url origin >/dev/null 2>&1 || {
+        err "update requires a configured origin remote"
+        return 1
+    }
+    info "fetching main from origin"
+    git -C "$RUNTIME_ROOT" fetch --quiet --no-tags origin main
+    git -C "$RUNTIME_ROOT" merge-base --is-ancestor HEAD FETCH_HEAD || {
+        err "origin/main cannot fast-forward the current checkout"
+        return 1
+    }
+    git -C "$RUNTIME_ROOT" merge --quiet --ff-only FETCH_HEAD
+    info "source updated to $(git -C "$RUNTIME_ROOT" rev-parse --short HEAD)"
     exec "$installer" --update "$@"
 }
 
@@ -631,6 +659,66 @@ require_runtime() {
         err "ansible-core $MIN_ANSIBLE_MAJOR.$MIN_ANSIBLE_MINOR or newer is required"
         return 1
     }
+}
+
+ansible_python_interpreter() {
+    local launcher shebang interpreter
+    launcher="$(command -v ansible-playbook)"
+    [[ -f "$launcher" && -r "$launcher" ]] || return 1
+    IFS= read -r shebang < "$launcher" || return 1
+    if [[ "$shebang" =~ ^\#!(/[^[:space:]]+)$ ]]; then
+        interpreter="${BASH_REMATCH[1]}"
+    elif [[ "$shebang" =~ ^\#!/usr/bin/env[[:space:]]+python3?$ ]]; then
+        interpreter="$(command -v python3)"
+    else
+        return 1
+    fi
+    [[ -x "$interpreter" ]] || return 1
+    printf '%s\n' "$interpreter"
+}
+
+validate_yaml_file() {
+    local file="$1" label="$2" interpreter
+    interpreter="$(ansible_python_interpreter)" || return 0
+    "$interpreter" - "$file" "$label" <<'PY'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    raise SystemExit(0)
+
+path, label = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as profile:
+        yaml.compose(profile)
+except yaml.YAMLError as error:
+    mark = getattr(error, "problem_mark", None)
+    if mark is not None:
+        print(
+            f"machstrap: error: invalid YAML in {label}: {path}:{mark.line + 1}:{mark.column + 1}: {error.problem}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"machstrap: error: invalid YAML in {label}: {path}: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+
+validate_profile_yaml() {
+    validate_yaml_file "$MACHSTRAP_PROFILE_FILE" profile
+}
+
+validate_inventory_yaml() {
+    local inventory="$1" inventory_root variables_root file
+    validate_yaml_file "$inventory" inventory || return $?
+    inventory_root="$(dirname "$inventory")"
+    for variables_root in "$inventory_root/group_vars" "$inventory_root/host_vars"; do
+        [[ -d "$variables_root" && ! -L "$variables_root" ]] || continue
+        while IFS= read -r file; do
+            validate_yaml_file "$file" "inventory variable file" || return $?
+        done < <(find "$variables_root" -type f ! -name '.*' -print | LC_ALL=C sort)
+    done
 }
 
 resolve_profile() {
@@ -1175,6 +1263,7 @@ run_ansible() {
         resolve_profile "$profile"
     fi
     require_runtime
+    validate_profile_yaml || return $?
 
     command=(ansible-playbook)
     if [[ "$action" == check ]]; then
@@ -1190,6 +1279,7 @@ run_ansible() {
             ;;
         inventory)
             inventory="$(canonical_file "$inventory")" || { err "inventory not found: $inventory"; return 1; }
+            validate_inventory_yaml "$inventory" || return $?
             command+=(--inventory "$inventory")
             [[ -n "$limit" ]] && command+=(--limit "$limit")
             target_description="$inventory (${limit:-all hosts})"
@@ -1250,6 +1340,10 @@ run_ansible() {
     "${command[@]}" 2>&1 | tee "$REPORT_TMP"
     ansible_status=${PIPESTATUS[0]}
     set -e
+    if [[ "$ansible_status" -eq 0 ]] && grep -qx 'skipping: no hosts matched' "$REPORT_TMP"; then
+        err "target selection matched no hosts: $target_description"
+        ansible_status=2
+    fi
     render_run_report "$REPORT_TMP" "$ansible_status" "$mode" "$profile" "$target_description" "$((SECONDS - started))"
     rm -f -- "$REPORT_TMP"
     REPORT_TMP=""

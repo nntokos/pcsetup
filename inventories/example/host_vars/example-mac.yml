@@ -1,0 +1,11 @@
+---
+# Per-host, non-secret settings for the example macOS workstation. Standalone
+# variables are available to profile templates and hooks; they are not merged
+# into Machstrap's validated configuration.
+media_root: /Users/operator/Media
+
+machstrap_overrides:
+  hostname:
+    computer_name: Example Mac
+    local_hostname: example-mac
+    hostname: example-mac

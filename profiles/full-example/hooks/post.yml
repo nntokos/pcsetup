@@ -1,0 +1,9 @@
+---
+# Example post-hook. Machstrap runs this after the machstrap role completes.
+# Hook tasks run on every selected target; keep them reviewed, idempotent, and
+# scoped to this profile.
+#
+# Replace this harmless task with follow-up work that belongs after Machstrap
+# converges the machine. Delete this file when no post-hook is needed.
+- name: Run the example profile post-hook script
+  ansible.builtin.script: "{{ machstrap_profile_root }}/scripts/example-post-hook.sh"

@@ -1,0 +1,10 @@
+---
+# Example pre-hook. Machstrap runs this after profile validation and before the
+# machstrap role. Hook tasks run on every selected target; keep them reviewed,
+# idempotent, and scoped to this profile.
+#
+# Replace this harmless task with setup that must happen before Machstrap
+# converges the machine. Delete this file when no pre-hook is needed.
+- name: Example profile pre-hook
+  ansible.builtin.debug:
+    msg: "Pre-hook for {{ inventory_hostname }}: replace or remove this example."

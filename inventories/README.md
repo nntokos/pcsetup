@@ -17,3 +17,8 @@ Machstrap refuses an unlimited inventory run unless `--all` is supplied.
 
 Never commit a Vault password file. Encrypted Vault YAML may be committed if
 that matches your repository's security policy.
+
+`host_vars/<inventory-host>.yml` may also define standalone, non-secret
+variables such as `media_root`. These are available to the selected profile
+and its hooks. Keep them outside `machstrap_overrides`, which accepts only
+documented Machstrap profile settings.
