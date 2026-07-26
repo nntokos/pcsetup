@@ -2,6 +2,8 @@
 
 The canonical reference is the fully commented
 [`profiles/full-example/profile.yml`](../profiles/full-example/profile.yml).
+Machstrap accepts a profile named either `profile.yml` or `profile.yaml`; the
+canonical example retains the former.
 Use `machstrap profiles default` to list the profiles shipped with the active
 runtime. `machstrap config PATH` may optionally point bare-name resolution at a
 directory of user profiles; this controller hint does not change the profile

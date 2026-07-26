@@ -14,7 +14,7 @@ profile path/name + optional profile-directory hint + inventory/Vault
  local machine or SSH targets
 ```
 
-The wrapper never interprets YAML. Ansible loads `profile.yml`, merges defaults
+The wrapper never interprets YAML. Ansible loads `profile.yml` or `profile.yaml`, merges defaults
 and inventory overrides, validates the resulting mapping, checks controller
 assets, and executes the role.
 

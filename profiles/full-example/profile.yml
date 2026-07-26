@@ -1,8 +1,9 @@
 ---
-# Complete machstrap profile reference.
+# Complete machstrap profile reference. Machstrap accepts this file as either
+# `profile.yml` or `profile.yaml`; this canonical example uses `profile.yml`.
 #
 # Copy this directory with:
-#   ./machstrap init ~/machine-configs/my-machine
+#   ./machstrap profiles new my-machine
 #
 # Preview it locally:
 #   ./machstrap check ~/machine-configs/my-machine --local

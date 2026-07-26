@@ -21,14 +21,29 @@ bash -n "$REPO_ROOT/machstrap" "$REPO_ROOT/quickstart.sh"
 ok "shell syntax"
 
 "$REPO_ROOT/machstrap" --help > "$TEST_TMP/help"
-grep -q 'Init a new profile' "$TEST_TMP/help" || fail "init help text"
-grep -q 'profiles default' "$TEST_TMP/help" || fail "profiles help text"
+grep -q 'Manage configured and bundled profiles' "$TEST_TMP/help" || fail "profiles help text"
+grep -q 'machstrap profiles \[COMMAND\]' "$TEST_TMP/help" || fail "profiles help text"
 "$REPO_ROOT/machstrap" config --help > "$TEST_TMP/config-help"
 grep -q '^Usage: machstrap config' "$TEST_TMP/config-help" || fail "config command help"
 "$REPO_ROOT/machstrap" profiles --help > "$TEST_TMP/profiles-help"
-grep -q 'open NAME' "$TEST_TMP/profiles-help" || fail "profiles open help"
-"$REPO_ROOT/machstrap" init --help > "$TEST_TMP/init-help"
-grep -q -- '--no-edit' "$TEST_TMP/init-help" || fail "init command help"
+grep -q 'edit NAME' "$TEST_TMP/profiles-help" || fail "profiles edit help"
+grep -q 'browse \[PROFILE\]' "$TEST_TMP/profiles-help" || fail "profiles browse help"
+"$REPO_ROOT/machstrap" profiles > "$TEST_TMP/profiles-command-help"
+cmp "$TEST_TMP/profiles-help" "$TEST_TMP/profiles-command-help" || fail "profiles command help"
+"$REPO_ROOT/machstrap" profiles new --help > "$TEST_TMP/profiles-new-help"
+grep -q -- '--no-edit' "$TEST_TMP/profiles-new-help" || fail "profiles new command help"
+"$REPO_ROOT/machstrap" profiles delete --help > "$TEST_TMP/profiles-delete-help"
+grep -q -- '--force' "$TEST_TMP/profiles-delete-help" || fail "profiles delete command help"
+"$REPO_ROOT/machstrap" inventories --help > "$TEST_TMP/inventories-help"
+grep -q '^  browse ' "$TEST_TMP/inventories-help" || fail "inventories browse help"
+"$REPO_ROOT/machstrap" identities --help > "$TEST_TMP/identities-help"
+grep -q '^  browse ' "$TEST_TMP/identities-help" || fail "identities browse help"
+set +e
+"$REPO_ROOT/machstrap" init > "$TEST_TMP/retired-init-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "retired init command status"
+grep -q 'unknown command: init' "$TEST_TMP/retired-init-output" || fail "retired init diagnostic"
 "$REPO_ROOT/machstrap" apply --help > "$TEST_TMP/apply-help"
 grep -q '^Usage: machstrap apply PROFILE' "$TEST_TMP/apply-help" || fail "apply command help"
 "$REPO_ROOT/machstrap" update --help > "$TEST_TMP/update-help"
@@ -45,12 +60,15 @@ ok "version metadata"
 
 config_home="$TEST_TMP/config home"
 profile_root="$TEST_TMP/user profiles"
-mkdir -p "$profile_root/alpha" "$profile_root/linux-server"
+mkdir -p "$profile_root/profiles/alpha" "$profile_root/profiles/linux-server"
 chmod 700 "$profile_root"
 cp "$REPO_ROOT/profiles/linux-workstation/profile.yml" \
-    "$profile_root/alpha/profile.yml"
+    "$profile_root/profiles/alpha/profile.yml"
 cp "$REPO_ROOT/profiles/linux-server/profile.yml" \
-    "$profile_root/linux-server/profile.yml"
+    "$profile_root/profiles/linux-server/profile.yml"
+mkdir -p "$profile_root/profiles/bravo"
+cp "$REPO_ROOT/profiles/linux-workstation/profile.yml" \
+    "$profile_root/profiles/bravo/profile.yaml"
 
 XDG_CONFIG_HOME="$config_home" \
     "$REPO_ROOT/machstrap" profiles default >"$TEST_TMP/default-profiles"
@@ -70,7 +88,7 @@ XDG_CONFIG_HOME="$config_home" \
 status=$?
 set -e
 [[ "$status" -eq 2 ]] || fail "unknown profiles command status"
-grep -q 'usage: machstrap profiles list|default|open PROFILE' \
+grep -q 'usage: machstrap profiles list|default|edit PROFILE' \
     "$TEST_TMP/unknown-profiles-output" || fail "profiles subcommand usage"
 ok "profile commands work without config or Ansible"
 
@@ -82,17 +100,18 @@ grep -qx "$profile_root_real" "$TEST_TMP/config-set" ||
 grep -Fq "successfully set the Machstrap profile directory to: $profile_root_real" \
     "$TEST_TMP/config-set-stderr" || fail "config success message"
 for default_profile in full-example linux-server linux-workstation macos-workstation; do
-    [[ -f "$profile_root/$default_profile/profile.yml" ]] ||
+    [[ -f "$profile_root/profiles/$default_profile/profile.yml" ]] ||
         fail "config did not copy bundled profile: $default_profile"
 done
-[[ -f "$profile_root/full-example/hooks/pre.yml" ]] || fail "config did not copy pre-hook example"
-[[ -f "$profile_root/full-example/hooks/post.yml" ]] || fail "config did not copy post-hook example"
-[[ -x "$profile_root/full-example/scripts/example-post-hook.sh" ]] ||
+[[ -f "$profile_root/profiles/full-example/hooks/pre.yml" ]] || fail "config did not copy pre-hook example"
+[[ -f "$profile_root/profiles/full-example/hooks/post.yml" ]] || fail "config did not copy post-hook example"
+[[ -x "$profile_root/profiles/full-example/scripts/example-post-hook.sh" ]] ||
     fail "config did not copy executable post-hook script"
-[[ -f "$profile_root/inventories/hosts.yml" ]] || fail "config did not copy inventory template"
-[[ -f "$profile_root/inventories/group_vars/all.yml" ]] || fail "config inventory group vars missing"
-[[ -f "$profile_root/inventories/host_vars/example-server.yml" ]] || fail "config inventory host vars missing"
-[[ -f "$profile_root/inventories/host_vars/example-mac.yml" ]] || fail "config inventory macOS host vars missing"
+[[ -f "$profile_root/inventories/example/hosts.yml" ]] || fail "config did not copy inventory template"
+[[ -f "$profile_root/inventories/example/group_vars/all.yml" ]] || fail "config inventory group vars missing"
+[[ -f "$profile_root/inventories/example/host_vars/example-server.yml" ]] || fail "config inventory host vars missing"
+[[ -f "$profile_root/inventories/example/host_vars/example-mac.yml" ]] || fail "config inventory macOS host vars missing"
+[[ -d "$profile_root/identities" ]] || fail "config did not create identities directory"
 [[ "$(mode_of "$config_home/machstrap")" == 700 ]] ||
     fail "config directory mode"
 [[ "$(mode_of "$config_home/machstrap/config")" == 600 ]] ||
@@ -104,11 +123,42 @@ XDG_CONFIG_HOME="$config_home" \
     "$REPO_ROOT/machstrap" profiles list >"$TEST_TMP/configured-profiles"
 grep -q '^  alpha ' "$TEST_TMP/configured-profiles" ||
     fail "configured profiles missing alpha"
+grep -q '^  bravo ' "$TEST_TMP/configured-profiles" ||
+    fail "configured profiles missing YAML-extension profile"
 grep -q 'linux-server.*overrides default' "$TEST_TMP/configured-profiles" ||
     fail "configured profile override marker"
 grep -q '^  macos-workstation ' "$TEST_TMP/configured-profiles" ||
     fail "configured profiles missing seeded bundled profile"
 ok "optional profile config and configured listing"
+
+mkdir -p "$profile_root/profiles/delete-me"
+cp "$REPO_ROOT/profiles/full-example/profile.yml" "$profile_root/profiles/delete-me/profile.yml"
+XDG_CONFIG_HOME="$config_home" \
+    "$REPO_ROOT/machstrap" profiles delete delete-me --force
+[[ ! -e "$profile_root/profiles/delete-me" ]] || fail "profiles delete did not remove complete profile"
+[[ -d "$REPO_ROOT/profiles/full-example" ]] || fail "profiles delete affected bundled profile"
+ok "configured profile deletion"
+
+XDG_CONFIG_HOME="$config_home" \
+    "$REPO_ROOT/machstrap" inventories default >"$TEST_TMP/default-inventories"
+grep -q '^  example ' "$TEST_TMP/default-inventories" || fail "default inventories missing example"
+XDG_CONFIG_HOME="$config_home" \
+    "$REPO_ROOT/machstrap" inventories new staging --no-edit
+[[ -f "$profile_root/inventories/staging/hosts.yml" ]] || fail "inventories new did not create configured inventory"
+XDG_CONFIG_HOME="$config_home" \
+    "$REPO_ROOT/machstrap" inventories delete staging --force
+[[ ! -e "$profile_root/inventories/staging" ]] || fail "inventories delete did not remove configured inventory"
+ok "configured inventory collections"
+
+touch "$profile_root/identities/test-id"
+chmod 600 "$profile_root/identities/test-id"
+XDG_CONFIG_HOME="$config_home" \
+    "$REPO_ROOT/machstrap" identities list >"$TEST_TMP/configured-identities"
+grep -q '^  test-id ' "$TEST_TMP/configured-identities" || fail "identities list did not include secure identity"
+XDG_CONFIG_HOME="$config_home" \
+    "$REPO_ROOT/machstrap" identities delete test-id --force
+[[ ! -e "$profile_root/identities/test-id" ]] || fail "identities delete did not remove identity"
+ok "configured identity collections"
 
 XDG_CONFIG_HOME="$config_home" \
     "$REPO_ROOT/machstrap" config --unset
@@ -259,15 +309,32 @@ MACHSTRAP_TEST_CAPTURE="$TEST_TMP/configured-profile-args" \
 MACHSTRAP_TEST_PROFILE_CAPTURE="$TEST_TMP/configured-profile-path" \
 XDG_CONFIG_HOME="$config_home" PATH="$TEST_TMP/bin:$PATH" \
 "$REPO_ROOT/machstrap" check alpha --local
-grep -qx "$profile_root_real/alpha/profile.yml" \
+grep -qx "$profile_root_real/profiles/alpha/profile.yml" \
     "$TEST_TMP/configured-profile-path" ||
     fail "configured bare profile was not resolved"
 configured_init="$TEST_TMP/configured-init"
 XDG_CONFIG_HOME="$config_home" \
-    "$REPO_ROOT/machstrap" init "$configured_init" --preset alpha --no-edit
-cmp "$profile_root/alpha/profile.yml" "$configured_init/profile.yml" ||
+    "$REPO_ROOT/machstrap" profiles new configured-init --out "$configured_init" --preset alpha --no-edit
+cmp "$profile_root/profiles/alpha/profile.yml" "$configured_init/profile.yml" ||
     fail "configured preset was not copied"
 ok "configured profile resolution and preset init"
+
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/yaml-profile-args" \
+MACHSTRAP_TEST_PROFILE_CAPTURE="$TEST_TMP/yaml-profile-path" \
+XDG_CONFIG_HOME="$config_home" PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" check bravo --local
+grep -qx "$profile_root_real/profiles/bravo/profile.yaml" \
+    "$TEST_TMP/yaml-profile-path" ||
+    fail "configured YAML-extension profile was not resolved"
+yaml_bundle="$TEST_TMP/bravo.machstrap"
+XDG_CONFIG_HOME="$config_home" \
+    "$REPO_ROOT/machstrap" bundle bravo --out "$yaml_bundle"
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/yaml-bundle-args" \
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" check "$yaml_bundle" --local
+grep -q '/playbooks/validate.yml' "$TEST_TMP/yaml-bundle-args" ||
+    fail "YAML-extension bundle was not resolved"
+ok "profile.yaml is accepted"
 
 chmod 644 "$config_home/machstrap/config"
 MACHSTRAP_TEST_CAPTURE="$TEST_TMP/unsafe-config-args" \
@@ -281,9 +348,9 @@ grep -q "$REPO_ROOT/playbooks/validate.yml" "$TEST_TMP/unsafe-config-args" ||
 MACHSTRAP_TEST_CAPTURE="$TEST_TMP/explicit-profile-args" \
 MACHSTRAP_TEST_PROFILE_CAPTURE="$TEST_TMP/explicit-profile-path" \
 XDG_CONFIG_HOME="$config_home" PATH="$TEST_TMP/bin:$PATH" \
-"$REPO_ROOT/machstrap" check "$profile_root/alpha" --local \
+"$REPO_ROOT/machstrap" check "$profile_root/profiles/alpha" --local \
     >"$TEST_TMP/explicit-profile-output" 2>&1
-grep -qx "$profile_root_real/alpha/profile.yml" \
+grep -qx "$profile_root_real/profiles/alpha/profile.yml" \
     "$TEST_TMP/explicit-profile-path" ||
     fail "unsafe optional config blocked explicit profile"
 chmod 600 "$config_home/machstrap/config"
@@ -338,12 +405,54 @@ grep -qx 'ansible_port=2222' "$TEST_TMP/ssh-args" || fail "ad-hoc SSH port"
 grep -qx "$identity_real" "$TEST_TMP/ssh-args" || fail "ad-hoc identity"
 ok "typed ad-hoc SSH options"
 
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/inventory-ssh-args" \
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" check full-example \
+    --inventory "$REPO_ROOT/inventories/example/hosts.yml" --limit example-server \
+    --host 203.0.113.99 --user deploy --port 2222 --identity "$TEST_TMP/identity"
+grep -qx "$REPO_ROOT/inventories/example/hosts.yml" "$TEST_TMP/inventory-ssh-args" ||
+    fail "inventory endpoint override lost inventory"
+grep -qx 'example-server' "$TEST_TMP/inventory-ssh-args" || fail "inventory endpoint override lost limit"
+grep -qx 'machstrap_transient_endpoint=true' "$TEST_TMP/inventory-ssh-args" ||
+    fail "inventory endpoint override did not enable single-host protection"
+grep -qx 'ansible_host=203.0.113.99' "$TEST_TMP/inventory-ssh-args" || fail "inventory endpoint host override"
+grep -qx 'ansible_user=deploy' "$TEST_TMP/inventory-ssh-args" || fail "inventory endpoint user override"
+grep -qx 'ansible_port=2222' "$TEST_TMP/inventory-ssh-args" || fail "inventory endpoint port override"
+grep -qx "ansible_ssh_private_key_file=$identity_real" "$TEST_TMP/inventory-ssh-args" ||
+    fail "inventory endpoint identity override"
+ok "inventory host supports transient SSH endpoint overrides"
+
+set +e
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" check full-example \
+    --inventory "$REPO_ROOT/inventories/example/hosts.yml" --all --host 203.0.113.99 \
+    >"$TEST_TMP/inventory-ssh-all-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "inventory endpoint override accepted --all"
+grep -q 'requires one explicit --limit host' "$TEST_TMP/inventory-ssh-all-output" ||
+    fail "inventory endpoint override --all diagnostic"
+ok "inventory endpoint overrides require one host"
+
+set +e
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" check full-example \
+    --inventory "$REPO_ROOT/inventories/example/hosts.yml" --limit example-server \
+    --host 203.0.113.99 --user 'invalid user' \
+    >"$TEST_TMP/inventory-ssh-user-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "inventory endpoint override accepted an invalid user"
+grep -q 'invalid SSH user' "$TEST_TMP/inventory-ssh-user-output" ||
+    fail "inventory endpoint override invalid user diagnostic"
+ok "inventory endpoint overrides validate SSH users"
+
 configured_bundle="$TEST_TMP/alpha.machstrap"
 XDG_CONFIG_HOME="$config_home" \
     "$REPO_ROOT/machstrap" bundle alpha --out "$configured_bundle"
 tar -xOf "$configured_bundle" machstrap/profiles/bundled/profile.yml \
     >"$TEST_TMP/configured-bundle-profile"
-cmp "$profile_root/alpha/profile.yml" "$TEST_TMP/configured-bundle-profile" ||
+cmp "$profile_root/profiles/alpha/profile.yml" "$TEST_TMP/configured-bundle-profile" ||
     fail "bundle did not use configured profile"
 ok "configured profile bundle resolution"
 
@@ -434,7 +543,7 @@ grep -q 'local installer update marker' "$install_prefix/share/machstrap/machstr
     fail "installer update did not use the current local source"
 rm -rf "$install_source"
 "$install_prefix/bin/machstrap" --help >"$TEST_TMP/installed-help"
-grep -q 'Init a new profile' "$TEST_TMP/installed-help" ||
+grep -q 'Manage configured and bundled profiles' "$TEST_TMP/installed-help" ||
     fail "installed runtime depends on source checkout"
 "$install_prefix/bin/machstrap" --version >"$TEST_TMP/installed-version"
 grep -qx "machstrap $expected_version" "$TEST_TMP/installed-version" ||

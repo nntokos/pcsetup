@@ -11,6 +11,15 @@
       user_dir: /tmp/machstrap-validation-home
       system: Validation
   tasks:
+    - name: Require exactly one selected host for a transient endpoint override
+      ansible.builtin.assert:
+        that: ansible_play_hosts_all | length == 1
+        fail_msg: A transient SSH endpoint override must select exactly one inventory host.
+      delegate_to: localhost
+      run_once: true
+      when: machstrap_transient_endpoint | default(false) | bool
+      tags: [always]
+
     - name: Load and validate the selected profile
       ansible.builtin.import_tasks: load-profile.yml
       tags: [always]

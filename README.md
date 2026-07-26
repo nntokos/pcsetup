@@ -176,6 +176,32 @@ machstrap apply linux-server \
 OpenSSH configuration is honored normally. `--ssh-config PATH` selects a
 non-default OpenSSH configuration file. Host-key checking stays enabled.
 
+### Transient endpoint overrides
+
+For disposable machines, keep their durable configuration under a logical
+inventory host, then replace only its SSH endpoint for one run. The selected
+host still receives its `host_vars`, group variables, and Vault overrides:
+
+```bash
+machstrap apply linux-server \
+  --inventory inventories/my-site/hosts.yml \
+  --limit web-01 \
+  --host 203.0.113.99 \
+  --user deploy \
+  --port 2222 \
+  --identity ~/.ssh/disposable_ed25519 \
+  --check --diff
+```
+
+In this form, `--limit` must resolve to exactly one inventory host and `--all`
+is not allowed. `--host`, `--user`, `--port`, and `--identity` temporarily
+override `ansible_host`, `ansible_user`, `ansible_port`, and
+`ansible_ssh_private_key_file`, respectively. `inventory_hostname` remains
+the stable logical name (`web-01` above); tasks and templates that need the
+current endpoint should use `ansible_host`. Recreated machines can cause an
+SSH host-key mismatch at a reused address—verify the new machine identity
+before updating the known-host entry.
+
 Ansible runs on the controller and transfers only the modules, templates,
 files, and scripts required by the selected profile. Machstrap is not uploaded
 or installed on the managed host.
@@ -186,7 +212,7 @@ A profile is a directory:
 
 ```text
 my-profile/
-├── profile.yml
+├── profile.yml              # `profile.yaml` is also accepted
 ├── assets/
 ├── hooks/
 │   ├── pre.yml
@@ -219,11 +245,28 @@ Open a profile for editing with the system editor (`$VISUAL`, then `$EDITOR`,
 then `vi`):
 
 ```bash
-machstrap profiles open my-machine
+machstrap profiles edit my-machine
 ```
 
-The configured directory contains immediate profile directories such as
-`~/machine-configs/my-machine/profile.yml`. It is only a convenience hint:
+Use the `browse` subcommand to open an entire configured collection in the system
+file manager. For example:
+
+```bash
+machstrap inventories browse
+```
+
+`machstrap profiles browse my-machine` opens that individual profile directory.
+
+The configured directory is organized into separate collections:
+
+```text
+~/machine-configs/
+├── profiles/my-machine/profile.yml
+├── inventories/example/hosts.yml
+└── identities/
+```
+
+It is only a convenience hint:
 explicit profile paths and shipped defaults continue to work without it. A
 missing, stale, malformed, or unsafe config is warned about and ignored.
 
@@ -237,10 +280,10 @@ machstrap config --unset
 
 Machstrap creates its config directory as `0700` and the file as `0600`. The
 selected profile directory must already exist and must not be group- or
-world-writable. On the first `machstrap config PATH`, Machstrap copies any
-missing bundled profile directories into `PATH` and creates
-`PATH/inventories/` from `inventories/example/`. Existing profiles and an
-existing inventory directory are preserved without modification.
+world-writable. On the first `machstrap config PATH`, Machstrap copies bundled
+profiles into `PATH/profiles/`, creates `PATH/inventories/example/`, and creates
+the private `PATH/identities/` directory. Existing collection entries are
+preserved without modification.
 
 `profiles list` shows only configured profiles. `profiles default` shows only
 the presets included with the active Machstrap runtime. A configured profile
@@ -250,26 +293,59 @@ override in the listing.
 Create the fully commented starter:
 
 ```bash
-machstrap init ~/machine-configs/my-machine
+machstrap profiles new my-machine
 ```
 
-When run from a terminal, `init` opens the new `profile.yml` in `$VISUAL`,
+When run from a terminal, `profiles new` opens the new profile file in `$VISUAL`,
 then `$EDITOR`, or `vi`. Use `--no-edit` for scripts or when you only want to
 create the scaffold; non-interactive runs do not start an editor.
 
 Or start from a preset:
 
 ```bash
-machstrap init ~/machine-configs/server --preset linux-server
+machstrap profiles new server --preset linux-server
 ```
 
 The supplied presets can always be discovered with
 `machstrap profiles default`.
 
+Delete a configured profile and all files in its directory with:
+
+```bash
+machstrap profiles delete my-machine
+```
+
+This command only deletes an immediate profile directory from the configured
+profile root; it cannot delete bundled profiles or arbitrary paths. It asks for
+confirmation in a terminal. Use `--force` only in reviewed automation.
+
+Use `--out DIR` with `profiles new` to scaffold outside the configured
+directory, for example `machstrap profiles new test --out /tmp/test-profile`.
+
+## Inventories and identities
+
+Configured inventories live in `inventories/`, and identity files live in the
+private `identities/` directory. Both collections are managed by name:
+
+```bash
+machstrap inventories list
+machstrap inventories new production
+machstrap inventories delete production
+machstrap identities list
+machstrap identities delete old-server-key
+```
+
+`inventories default` lists the bundled templates, and `inventories edit NAME`
+or `identities edit NAME` edits a configured entry in the system editor. Use
+`inventories browse` or `identities browse` to open their collection directories.
+Inventory creation copies the bundled `example` template by default. Identity
+files are never generated or copied automatically; only user-owned, mode `0600`
+regular files are listed, opened, or deleted.
+
 Configuration precedence is fixed:
 
 1. Safe role defaults.
-2. `machstrap_profile` from the selected `profile.yml`.
+2. `machstrap_profile` from the selected `profile.yml` or `profile.yaml`.
 3. Inventory `machstrap_overrides`.
 4. Encrypted `machstrap_vault_overrides`.
 

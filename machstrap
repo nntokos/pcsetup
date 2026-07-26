@@ -210,10 +210,9 @@ Usage:
   machstrap doctor
   machstrap update|upgrade [--prefix PATH]
   machstrap config [PATH|--unset]
-  machstrap profiles list
-  machstrap profiles default
-  machstrap profiles open PROFILE
-  machstrap init DEST [--preset PRESET] [--force] [--no-edit]
+  machstrap profiles [COMMAND]
+  machstrap inventories [COMMAND]
+  machstrap identities [COMMAND]
   machstrap check PROFILE [target options]
   machstrap apply PROFILE|FILE.machstrap [target options]
   machstrap bundle PROFILE --out FILE.machstrap [--force]
@@ -223,10 +222,9 @@ Commands:
   doctor                              Check controller prerequisites
   update, upgrade                     Fast-forward a source checkout and reinstall it
   config                              Set, show, or unset the optional profile directory
-  profiles list                       List profiles from the configured directory
-  profiles default                    List profiles shipped with machstrap
-  profiles open                       Open a profile in the configured editor
-  init                                Init a new profile and open it in an editor
+  profiles                            Manage configured and bundled profiles
+  inventories                         Manage configured and bundled inventories
+  identities                          Manage configured SSH identity files
   check                               Validate a profile without changing targets
   apply                               Apply or dry-run a profile
   bundle                              Build a portable profile archive
@@ -236,8 +234,10 @@ Target modes:
   --inventory PATH --limit PATTERN  Apply selected inventory hosts
   --inventory PATH --all            Explicitly apply every inventory host
   --host HOST [SSH options]          Apply to one ad-hoc SSH host
+  --inventory PATH --limit HOST --host HOST [SSH options]
+                                    Apply one inventory host using a transient SSH endpoint
 
-SSH options (only with --host):
+SSH options (with ad-hoc --host or an inventory endpoint override):
   --user USER
   --port PORT
   --identity PATH
@@ -253,7 +253,8 @@ Execution options:
   --skip-tags TAGS
   -v, -vv, -vvv, -vvvv
 
-PROFILE is either a directory containing profile.yml, a profile.yml path, or
+PROFILE is either a directory containing profile.yml or profile.yaml, a profile
+file path, or
 a bare name from the optional configured directory or this runtime's bundled
 profiles/ directory.
 EOF
@@ -271,25 +272,67 @@ EOF
 
 profiles_usage() {
     cat <<'EOF'
-Usage: machstrap profiles list|default|open PROFILE
+Usage: machstrap profiles list|default|edit PROFILE|browse [PROFILE]|new NAME|delete PROFILE
 
   list       List profiles in the configured profile directory
   default    List profiles included with the active Machstrap runtime
-  open NAME  Open a configured or bundled profile in the system editor
+  edit NAME  Edit a configured or bundled profile in the editor
+  browse     Open the configured profiles directory, or one resolved profile,
+             in the system file manager
+  new NAME   Create a profile in the configured profiles directory
+  delete     Delete a configured profile and all of its files
 EOF
 }
 
-init_usage() {
+profiles_new_usage() {
     cat <<'EOF'
-Usage: machstrap init DEST [--preset PRESET] [--force] [--no-edit]
+Usage: machstrap profiles new NAME [--out DIR] [--preset PRESET] [--force] [--no-edit]
 
-Create a profile at DEST from the fully commented full-example preset, or a
-named preset. In an interactive terminal, profile.yml opens in $VISUAL,
+Create a profile named NAME in the configured profiles directory from the fully
+commented full-example preset, or a named preset. --out writes to DIR instead.
+In an interactive terminal, the profile file opens in $VISUAL,
 $EDITOR, or vi unless --no-edit is used.
 
   --preset PRESET  Use a bundled or configured preset (default: full-example)
+  --out DIR        Write to DIR instead of the configured profiles directory
   --force          Copy only into an existing empty DEST directory
-  --no-edit        Do not open profile.yml after creation
+  --no-edit        Do not open the profile file after creation
+EOF
+}
+
+inventories_usage() {
+    cat <<'EOF'
+Usage: machstrap inventories list|default|edit INVENTORY|browse|new NAME|delete INVENTORY
+
+  list              List configured inventories
+  default           List inventories included with the active Machstrap runtime
+  edit NAME         Edit a configured or bundled inventory in the editor
+  browse            Open the configured inventories directory in the file manager
+  new NAME          Create an inventory in the configured inventories directory
+  delete NAME       Delete a configured inventory and all of its files
+EOF
+}
+
+identities_usage() {
+    cat <<'EOF'
+Usage: machstrap identities list|edit IDENTITY|browse|delete IDENTITY
+
+  list        List configured identity files
+  edit NAME   Edit a configured identity file in the editor
+  browse      Open the configured identities directory in the file manager
+  delete NAME Delete a configured identity file
+EOF
+}
+
+profiles_delete_usage() {
+    cat <<'EOF'
+Usage: machstrap profiles delete PROFILE [--force]
+
+Delete the complete configured profile directory named PROFILE. Bundled
+profiles and arbitrary paths cannot be deleted. Confirmation is required
+unless --force is supplied.
+
+  --force  Delete without interactive confirmation
 EOF
 }
 
@@ -314,6 +357,7 @@ Target options (choose one):
   --inventory PATH --limit PATTERN
   --inventory PATH --all
   --host HOST [--user USER] [--port PORT] [--identity PATH] [--ssh-config PATH]
+  --inventory PATH --limit HOST --host HOST [--user USER] [--port PORT] [--identity PATH] [--ssh-config PATH]
 
 Execution options:
   --dry-run, --check  Preview changes without applying them
@@ -479,6 +523,20 @@ profile_file_safe() {
     path_not_group_world_writable "$file"
 }
 
+profile_file_path() {
+    local directory="$1" yml="$1/profile.yml" yaml="$1/profile.yaml"
+    if [[ -e "$yml" || -L "$yml" ]] && [[ -e "$yaml" || -L "$yaml" ]]; then
+        return 2
+    fi
+    if profile_file_safe "$yml"; then
+        printf '%s\n' "$yml"
+    elif profile_file_safe "$yaml"; then
+        printf '%s\n' "$yaml"
+    else
+        return 1
+    fi
+}
+
 load_configured_profile_root() {
     local root line_count canonical
     CONFIGURED_PROFILE_ROOT=""
@@ -525,20 +583,41 @@ load_configured_profile_root() {
 }
 
 configured_profile_candidate() {
-    local name="$1" candidate
+    local name="$1" candidate profiles_root
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
-    load_configured_profile_root >/dev/null || true
-    [[ -n "$CONFIGURED_PROFILE_ROOT" ]] || return 1
-    candidate="$CONFIGURED_PROFILE_ROOT/$name"
+    profiles_root="$(configured_collection_root profiles)" || return 1
+    candidate="$profiles_root/$name"
     if [[ -e "$candidate" || -L "$candidate" ]]; then
-        if profile_root_safe "$candidate" &&
-           profile_file_safe "$candidate/profile.yml"; then
+        if profile_root_safe "$candidate" && profile_file_path "$candidate" >/dev/null; then
             printf '%s\n' "$candidate"
             return 0
         fi
         warn "ignoring unsafe configured profile: $candidate"
     fi
     return 1
+}
+
+configured_collection_root() {
+    local collection="$1" root
+    [[ "$collection" == profiles || "$collection" == inventories || "$collection" == identities ]] || return 2
+    load_configured_profile_root >/dev/null || true
+    [[ -n "$CONFIGURED_PROFILE_ROOT" ]] || return 1
+    root="$CONFIGURED_PROFILE_ROOT/$collection"
+    profile_root_safe "$root" || return 1
+    printf '%s\n' "$root"
+}
+
+valid_collection_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+identity_file_safe() {
+    local file="$1" identity uid mode
+    [[ -f "$file" && ! -L "$file" && -r "$file" ]] || return 1
+    identity="$(path_identity "$file")" || return 1
+    uid="${identity%% *}"
+    mode="${identity#* }"
+    [[ "$uid" == "$(id -u)" && "$mode" == 600 ]]
 }
 
 sha256_tool() {
@@ -722,17 +801,27 @@ validate_inventory_yaml() {
 }
 
 resolve_profile() {
-    local value="$1" candidate root configured
+    local value="$1" candidate root configured profile_file status
     if [[ -d "$value" ]]; then
-        candidate="$value/profile.yml"
+        profile_file="$(profile_file_path "$value")"
+        status=$?
+        if (( status != 0 )); then
+            if (( status == 2 )); then
+                err "profile directory contains both profile.yml and profile.yaml: $value"
+            else
+                err "profile.yml or profile.yaml not found: $value"
+            fi
+            return 1
+        fi
+        candidate="$profile_file"
     elif [[ -f "$value" ]]; then
         candidate="$value"
     elif [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
         configured="$(configured_profile_candidate "$value")" || configured=""
         if [[ -n "$configured" ]]; then
-            candidate="$configured/profile.yml"
-        elif [[ -f "$RUNTIME_ROOT/profiles/$value/profile.yml" ]]; then
-            candidate="$RUNTIME_ROOT/profiles/$value/profile.yml"
+            candidate="$(profile_file_path "$configured")"
+        elif profile_file="$(profile_file_path "$RUNTIME_ROOT/profiles/$value")"; then
+            candidate="$profile_file"
         else
             err "profile not found: $value"
             return 1
@@ -742,16 +831,16 @@ resolve_profile() {
         return 1
     fi
     candidate="$(canonical_file "$candidate")" || {
-        err "profile.yml not found: $candidate"
+        err "profile file not found: $candidate"
         return 1
     }
-    [[ "$(basename "$candidate")" == "profile.yml" ]] || {
-        err "a profile file must be named profile.yml: $candidate"
+    [[ "$(basename "$candidate")" == "profile.yml" || "$(basename "$candidate")" == "profile.yaml" ]] || {
+        err "a profile file must be named profile.yml or profile.yaml: $candidate"
         return 1
     }
     root="$(canonical_directory "$(dirname "$candidate")")"
     [[ ! -L "$candidate" ]] || {
-        err "profile.yml must not be a symbolic link"
+        err "profile files must not be symbolic links"
         return 1
     }
     MACHSTRAP_PROFILE_FILE="$candidate"
@@ -835,7 +924,7 @@ config_set_profile_root() {
 }
 
 bootstrap_configured_content() {
-    local root="$1" source destination name
+    local root="$1" source destination name old_umask
     [[ -d "$RUNTIME_ROOT/profiles" && ! -L "$RUNTIME_ROOT/profiles" ]] || {
         err "could not bootstrap the Machstrap profile directory: bundled profiles are unavailable"
         return 1
@@ -849,10 +938,30 @@ bootstrap_configured_content() {
         return 1
     fi
 
+    old_umask="$(umask)"
+    umask 077
+    mkdir -p "$root/profiles" "$root/inventories" || {
+        umask "$old_umask"
+        err "could not bootstrap the Machstrap profile directory: failed to create collection directories"
+        return 1
+    }
+    mkdir -p "$root/identities" || {
+        umask "$old_umask"
+        err "could not bootstrap the Machstrap profile directory: failed to create identities directory"
+        return 1
+    }
+    umask "$old_umask"
+    profile_root_safe "$root/profiles" && profile_root_safe "$root/inventories" &&
+        profile_root_safe "$root/identities" || {
+        err "could not bootstrap the Machstrap profile directory: collection directories must not be group/world writable"
+        return 1
+    }
+
     for source in "$RUNTIME_ROOT/profiles"/*; do
-        [[ -d "$source" && ! -L "$source" && -f "$source/profile.yml" && ! -L "$source/profile.yml" ]] || continue
+        [[ -d "$source" && ! -L "$source" ]] || continue
+        profile_file_path "$source" >/dev/null || continue
         name="$(basename "$source")"
-        destination="$root/$name"
+        destination="$root/profiles/$name"
         if [[ -e "$destination" || -L "$destination" ]]; then
             info "preserved existing profile: $destination"
         else
@@ -864,15 +973,15 @@ bootstrap_configured_content() {
         fi
     done
 
-    destination="$root/inventories"
+    destination="$root/inventories/example"
     if [[ -e "$destination" || -L "$destination" ]]; then
-        info "preserved existing inventory directory: $destination"
+        info "preserved existing inventory: $destination"
     else
         cp -R "$RUNTIME_ROOT/inventories/example" "$destination" || {
             err "could not bootstrap the Machstrap profile directory: failed to copy the inventory template"
             return 1
         }
-        info "copied inventory template: $destination"
+        info "copied bundled inventory: $destination"
     fi
 }
 
@@ -950,16 +1059,17 @@ profile_summary() {
 }
 
 profile_records() {
-    local root="$1" include_overrides="$2" directory name summary suffix
+    local root="$1" include_overrides="$2" directory name summary suffix profile_file runtime_profile
     for directory in "$root"/*; do
         profile_root_safe "$directory" || continue
         name="$(basename "$directory")"
         [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
-        profile_file_safe "$directory/profile.yml" || continue
-        summary="$(profile_summary "$directory/profile.yml")"
+        profile_file="$(profile_file_path "$directory")" || continue
+        summary="$(profile_summary "$profile_file")"
         [[ -n "$summary" ]] || summary="No description."
         suffix=""
-        if [[ "$include_overrides" == true && -f "$RUNTIME_ROOT/profiles/$name/profile.yml" ]]; then
+        runtime_profile="$(profile_file_path "$RUNTIME_ROOT/profiles/$name" 2>/dev/null)" || runtime_profile=""
+        if [[ "$include_overrides" == true && -n "$runtime_profile" ]]; then
             suffix=" [overrides default]"
         fi
         printf '%s\t%s%s\n' "$name" "$summary" "$suffix"
@@ -978,8 +1088,8 @@ render_profile_records() {
 }
 
 profiles_command() {
-    local subcommand="${1:-}" profile records
-    if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then
+    local subcommand="${1:-}" profile records profiles_root
+    if (( $# == 0 )) || { (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; }; then
         profiles_usage
         return
     fi
@@ -991,8 +1101,12 @@ profiles_command() {
                 printf 'No profile directory configured. Run: machstrap config PATH\n'
                 return 0
             fi
-            records="$(profile_records "$CONFIGURED_PROFILE_ROOT" true)"
-            printf 'Configured profiles (%s):\n' "$CONFIGURED_PROFILE_ROOT"
+            profiles_root="$(configured_collection_root profiles)" || {
+                printf 'No configured profiles directory. Run: machstrap config PATH\n'
+                return 0
+            }
+            records="$(profile_records "$profiles_root" true)"
+            printf 'Configured profiles (%s):\n' "$profiles_root"
             render_profile_records "$records"
             ;;
         default)
@@ -1001,37 +1115,109 @@ profiles_command() {
             printf 'Default profiles:\n'
             render_profile_records "$records"
             ;;
-        open)
-            (( $# == 2 )) || { err "usage: machstrap profiles open PROFILE"; return 2; }
+        edit)
+            (( $# == 2 )) || { err "usage: machstrap profiles edit PROFILE"; return 2; }
             profile="$2"
             [[ -t 0 && -t 1 ]] || {
-                err "profiles open requires an interactive terminal"
+                err "profiles edit requires an interactive terminal"
                 return 1
             }
             resolve_profile "$profile"
             open_profile_editor "$MACHSTRAP_PROFILE_FILE"
             ;;
+        browse)
+            (( $# <= 2 )) || { err "usage: machstrap profiles browse [PROFILE]"; return 2; }
+            if (( $# == 2 )); then
+                resolve_profile "$2"
+                show_in_file_manager "$(dirname "$MACHSTRAP_PROFILE_FILE")"
+            else
+                profiles_root="$(configured_collection_root profiles)" || { err "no configured profiles directory; set one with: machstrap config PATH"; return 1; }
+                show_in_file_manager "$profiles_root"
+            fi
+            ;;
+        new)
+            shift
+            profiles_new "$@"
+            ;;
+        delete)
+            shift
+            profiles_delete "$@"
+            ;;
         *)
             err "unknown profiles command: $subcommand"
-            err "usage: machstrap profiles list|default|open PROFILE"
+            err "usage: machstrap profiles list|default|edit PROFILE|browse [PROFILE]|new NAME|delete PROFILE"
             return 2
             ;;
     esac
 }
 
-init_profile() {
-    local destination="" preset="full-example" force=false edit=true source configured
+profiles_delete() {
+    local profile="" force=false profile_dir response profiles_root
     while (( $# )); do
         case "$1" in
-            --help|-h) init_usage; return ;;
-            --preset) [[ $# -ge 2 ]] || { err "--preset requires a value"; return 2; }; preset="$2"; shift 2 ;;
+            --help|-h) profiles_delete_usage; return ;;
             --force) force=true; shift ;;
-            --no-edit) edit=false; shift ;;
-            -*) err "unknown init option: $1"; return 2 ;;
-            *) [[ -z "$destination" ]] || { err "init accepts one destination"; return 2; }; destination="$1"; shift ;;
+            -*) err "unknown profiles delete option: $1"; return 2 ;;
+            *) [[ -z "$profile" ]] || { err "profiles delete accepts one profile name"; return 2; }; profile="$1"; shift ;;
         esac
     done
-    [[ -n "$destination" ]] || { err "init requires a destination"; return 2; }
+    [[ -n "$profile" ]] || { err "profiles delete requires a profile name"; return 2; }
+    valid_collection_name "$profile" || {
+        err "invalid profile name: $profile"
+        return 2
+    }
+    profiles_root="$(configured_collection_root profiles)" || {
+        err "no Machstrap profile directory is configured; set one with: machstrap config PATH"
+        return 1
+    }
+    profile_dir="$profiles_root/$profile"
+    profile_root_safe "$profile_dir" && profile_file_path "$profile_dir" >/dev/null || {
+        err "configured profile not found or unsafe: $profile"
+        return 1
+    }
+    if [[ "$force" != true ]]; then
+        [[ -t 0 && -t 1 ]] || {
+            err "profiles delete requires an interactive terminal or --force"
+            return 1
+        }
+        printf 'Delete configured profile %s and all of its files? [y/N] ' "$profile" >&2
+        IFS= read -r response
+        [[ "$response" == y || "$response" == Y || "$response" == yes || "$response" == YES ]] || {
+            info "profile deletion cancelled"
+            return 0
+        }
+    fi
+    rm -rf -- "$profile_dir" || {
+        err "could not delete configured profile: $profile"
+        return 1
+    }
+    info "successfully deleted configured profile: $profile"
+}
+
+profiles_new() {
+    local name="" destination="" out="" preset="full-example" force=false edit=true source configured profiles_root source_profile
+    while (( $# )); do
+        case "$1" in
+            --help|-h) profiles_new_usage; return ;;
+            --preset) [[ $# -ge 2 ]] || { err "--preset requires a value"; return 2; }; preset="$2"; shift 2 ;;
+            --out) [[ $# -ge 2 ]] || { err "--out requires a directory"; return 2; }; out="$2"; shift 2 ;;
+            --force) force=true; shift ;;
+            --no-edit) edit=false; shift ;;
+            -*) err "unknown profiles new option: $1"; return 2 ;;
+            *) [[ -z "$name" ]] || { err "profiles new accepts one name"; return 2; }; name="$1"; shift ;;
+        esac
+    done
+    [[ -n "$name" ]] || { err "profiles new requires a name"; return 2; }
+    valid_collection_name "$name" || { err "invalid profile name: $name"; return 2; }
+    if [[ -n "$out" ]]; then
+        destination="$out"
+    else
+        profiles_root="$(configured_collection_root profiles)" || {
+            err "no configured profiles directory; set one with: machstrap config PATH or use --out DIR"
+            return 1
+        }
+        destination="$profiles_root/$name"
+    fi
     [[ "$preset" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
         err "invalid preset name: $preset"
         return 2
@@ -1043,6 +1229,7 @@ init_profile() {
         source="$RUNTIME_ROOT/profiles/$preset"
     fi
     [[ -d "$source" && ! -L "$source" ]] || { err "unknown preset: $preset"; return 2; }
+    source_profile="$(profile_file_path "$source")" || { err "unknown or ambiguous preset profile: $preset"; return 2; }
     if [[ -e "$destination" && "$force" != true ]]; then
         err "destination exists: $destination (use --force to replace an empty scaffold)"
         return 1
@@ -1058,8 +1245,159 @@ init_profile() {
     cp -R "$source/." "$destination/"
     info "created profile: $destination"
     if [[ "$edit" == true && -t 0 && -t 1 ]]; then
-        open_profile_editor "$destination/profile.yml" || true
+        open_profile_editor "$destination/$(basename "$source_profile")" || true
     fi
+}
+
+inventory_records() {
+    local root="$1" directory name
+    for directory in "$root"/*; do
+        profile_root_safe "$directory" || continue
+        name="$(basename "$directory")"
+        valid_collection_name "$name" || continue
+        profile_file_safe "$directory/hosts.yml" || continue
+        printf '%s\tInventory at %s\n' "$name" "$directory"
+    done | LC_ALL=C sort
+}
+
+inventory_candidate() {
+    local name="$1" root candidate
+    valid_collection_name "$name" || return 1
+    root="$(configured_collection_root inventories)" || return 1
+    candidate="$root/$name"
+    profile_root_safe "$candidate" && profile_file_safe "$candidate/hosts.yml" || return 1
+    printf '%s\n' "$candidate"
+}
+
+default_inventory_candidate() {
+    local name="$1" candidate="$RUNTIME_ROOT/inventories/$1"
+    valid_collection_name "$name" || return 1
+    profile_root_safe "$candidate" && profile_file_safe "$candidate/hosts.yml" || return 1
+    printf '%s\n' "$candidate"
+}
+
+inventories_command() {
+    local subcommand="${1:-}" name="" root records directory source destination out="" force=false edit=true preset="example"
+    if (( $# == 0 )) || { (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; }; then
+        inventories_usage
+        return
+    fi
+    case "$subcommand" in
+        list)
+            (( $# == 1 )) || { err "usage: machstrap inventories list"; return 2; }
+            root="$(configured_collection_root inventories)" || { printf 'No configured inventories directory. Run: machstrap config PATH\n'; return 0; }
+            records="$(inventory_records "$root")"
+            printf 'Configured inventories (%s):\n' "$root"
+            render_profile_records "$records"
+            ;;
+        default)
+            (( $# == 1 )) || { err "usage: machstrap inventories default"; return 2; }
+            records="$(inventory_records "$RUNTIME_ROOT/inventories")"
+            printf 'Default inventories:\n'
+            render_profile_records "$records"
+            ;;
+        edit)
+            (( $# == 2 )) || { err "usage: machstrap inventories edit INVENTORY"; return 2; }
+            [[ -t 0 && -t 1 ]] || { err "inventories edit requires an interactive terminal"; return 1; }
+            name="$2"
+            directory="$(inventory_candidate "$name")" || directory="$(default_inventory_candidate "$name")" || {
+                err "inventory not found: $name"; return 1;
+            }
+            open_profile_editor "$directory/hosts.yml"
+            ;;
+        browse)
+            (( $# == 1 )) || { err "usage: machstrap inventories browse"; return 2; }
+            root="$(configured_collection_root inventories)" || { err "no configured inventories directory; set one with: machstrap config PATH"; return 1; }
+            show_in_file_manager "$root"
+            ;;
+        new)
+            shift
+            while (( $# )); do
+                case "$1" in
+                    --help|-h) inventories_usage; return ;;
+                    --out) [[ $# -ge 2 ]] || { err "--out requires a directory"; return 2; }; out="$2"; shift 2 ;;
+                    --preset) [[ $# -ge 2 ]] || { err "--preset requires a value"; return 2; }; preset="$2"; shift 2 ;;
+                    --force) force=true; shift ;;
+                    --no-edit) edit=false; shift ;;
+                    -*) err "unknown inventories new option: $1"; return 2 ;;
+                    *) [[ -z "$name" ]] || { err "inventories new accepts one name"; return 2; }; name="$1"; shift ;;
+                esac
+            done
+            [[ -n "$name" ]] && valid_collection_name "$name" || { err "inventories new requires a valid name"; return 2; }
+            valid_collection_name "$preset" || { err "invalid preset name: $preset"; return 2; }
+            source="$(default_inventory_candidate "$preset")" || { err "unknown inventory preset: $preset"; return 2; }
+            if [[ -n "$out" ]]; then destination="$out"; else
+                root="$(configured_collection_root inventories)" || { err "no configured inventories directory; set one with: machstrap config PATH or use --out DIR"; return 1; }
+                destination="$root/$name"
+            fi
+            if [[ -e "$destination" && "$force" != true ]]; then err "destination exists: $destination (use --force to replace an empty scaffold)"; return 1; fi
+            if [[ -e "$destination" && "$force" == true ]]; then
+                [[ -d "$destination" && -z "$(find "$destination" -mindepth 1 -print -quit)" ]] || { err "--force only permits an existing empty directory"; return 1; }
+            fi
+            mkdir -p -- "$destination" && cp -R "$source/." "$destination/" || { err "could not create inventory: $destination"; return 1; }
+            info "created inventory: $destination"
+            [[ "$edit" != true || ! -t 0 || ! -t 1 ]] || open_profile_editor "$destination/hosts.yml" || true
+            ;;
+        delete)
+            shift
+            inventories_delete "$@"
+            ;;
+        *) err "unknown inventories command: $subcommand"; err "usage: machstrap inventories list|default|edit INVENTORY|browse|new NAME|delete INVENTORY"; return 2 ;;
+    esac
+}
+
+inventories_delete() {
+    local name="" force=false root directory response
+    while (( $# )); do case "$1" in --help|-h) inventories_usage; return ;; --force) force=true; shift ;; -*) err "unknown inventories delete option: $1"; return 2 ;; *) [[ -z "$name" ]] || { err "inventories delete accepts one name"; return 2; }; name="$1"; shift ;; esac; done
+    [[ -n "$name" ]] && valid_collection_name "$name" || { err "inventories delete requires a valid name"; return 2; }
+    root="$(configured_collection_root inventories)" || { err "no configured inventories directory; set one with: machstrap config PATH"; return 1; }
+    directory="$root/$name"
+    profile_root_safe "$directory" && profile_file_safe "$directory/hosts.yml" || { err "configured inventory not found or unsafe: $name"; return 1; }
+    if [[ "$force" != true ]]; then [[ -t 0 && -t 1 ]] || { err "inventories delete requires an interactive terminal or --force"; return 1; }; printf 'Delete configured inventory %s and all of its files? [y/N] ' "$name" >&2; IFS= read -r response; [[ "$response" == y || "$response" == Y || "$response" == yes || "$response" == YES ]] || { info "inventory deletion cancelled"; return 0; }; fi
+    rm -rf -- "$directory" || { err "could not delete configured inventory: $name"; return 1; }
+    info "successfully deleted configured inventory: $name"
+}
+
+identities_command() {
+    local subcommand="${1:-}" name root file records response force=false
+    if (( $# == 0 )) || { (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; }; then identities_usage; return; fi
+    case "$subcommand" in
+        list)
+            (( $# == 1 )) || { err "usage: machstrap identities list"; return 2; }
+            root="$(configured_collection_root identities)" || { printf 'No configured identities directory. Run: machstrap config PATH\n'; return 0; }
+            records=""
+            for file in "$root"/*; do identity_file_safe "$file" || continue; name="$(basename "$file")"; valid_collection_name "$name" || continue; records+="$name"$'\t'"$file"$'\n'; done
+            printf 'Configured identities (%s):\n' "$root"
+            render_profile_records "$(printf '%s' "$records" | LC_ALL=C sort)"
+            ;;
+        edit)
+            (( $# == 2 )) || { err "usage: machstrap identities edit IDENTITY"; return 2; }
+            [[ -t 0 && -t 1 ]] || { err "identities edit requires an interactive terminal"; return 1; }
+            valid_collection_name "$2" || { err "invalid identity name: $2"; return 2; }
+            root="$(configured_collection_root identities)" || { err "no configured identities directory; set one with: machstrap config PATH"; return 1; }
+            file="$root/$2"; identity_file_safe "$file" || { err "configured identity not found or unsafe: $2"; return 1; }
+            open_profile_editor "$file"
+            ;;
+        browse)
+            (( $# == 1 )) || { err "usage: machstrap identities browse"; return 2; }
+            root="$(configured_collection_root identities)" || { err "no configured identities directory; set one with: machstrap config PATH"; return 1; }
+            show_in_file_manager "$root"
+            ;;
+        delete)
+            shift; identities_delete "$@" ;;
+        *) err "unknown identities command: $subcommand"; err "usage: machstrap identities list|edit IDENTITY|browse|delete IDENTITY"; return 2 ;;
+    esac
+}
+
+identities_delete() {
+    local name="" force=false root file response
+    while (( $# )); do case "$1" in --help|-h) identities_usage; return ;; --force) force=true; shift ;; -*) err "unknown identities delete option: $1"; return 2 ;; *) [[ -z "$name" ]] || { err "identities delete accepts one name"; return 2; }; name="$1"; shift ;; esac; done
+    [[ -n "$name" ]] && valid_collection_name "$name" || { err "identities delete requires a valid name"; return 2; }
+    root="$(configured_collection_root identities)" || { err "no configured identities directory; set one with: machstrap config PATH"; return 1; }
+    file="$root/$name"; identity_file_safe "$file" || { err "configured identity not found or unsafe: $name"; return 1; }
+    if [[ "$force" != true ]]; then [[ -t 0 && -t 1 ]] || { err "identities delete requires an interactive terminal or --force"; return 1; }; printf 'Delete configured identity %s? [y/N] ' "$name" >&2; IFS= read -r response; [[ "$response" == y || "$response" == Y || "$response" == yes || "$response" == YES ]] || { info "identity deletion cancelled"; return 0; }; fi
+    rm -f -- "$file" || { err "could not delete configured identity: $name"; return 1; }
+    info "successfully deleted configured identity: $name"
 }
 
 open_profile_editor() {
@@ -1077,6 +1415,27 @@ open_profile_editor() {
         warn "could not open profile; the editor exited unsuccessfully"
         return 1
     }
+}
+
+show_in_file_manager() {
+    local path="$1"
+    [[ -d "$path" && ! -L "$path" ]] || { err "cannot open missing or unsafe directory: $path"; return 1; }
+    case "$(uname -s)" in
+        Darwin)
+            command_exists open || { err "the system file manager is unavailable"; return 1; }
+            info "opening in file manager: $path"
+            open "$path"
+            ;;
+        Linux)
+            command_exists xdg-open || { err "xdg-open is required to show files in the system file manager"; return 1; }
+            info "opening in file manager: $path"
+            xdg-open "$path"
+            ;;
+        *)
+            err "showing files in the system file manager is unsupported on this platform"
+            return 1
+            ;;
+    esac
 }
 
 check_profile_tree() {
@@ -1187,7 +1546,7 @@ verify_manifest() {
 }
 
 extract_bundle() {
-    local archive="$1" member listing
+    local archive="$1" member listing bundled_profile
     archive="$(canonical_file "$archive")" || { err "bundle not found: $archive"; return 1; }
     ACTIVE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/machstrap-apply.XXXXXX")"
     chmod 700 "$ACTIVE_TMP"
@@ -1206,7 +1565,11 @@ extract_bundle() {
     fi
     tar -xzf "$archive" -C "$ACTIVE_TMP"
     RUNTIME_ROOT="$ACTIVE_TMP/machstrap"
-    [[ -f "$RUNTIME_ROOT/playbooks/site.yml" && -f "$RUNTIME_ROOT/profiles/bundled/profile.yml" ]] || {
+    bundled_profile="$(profile_file_path "$RUNTIME_ROOT/profiles/bundled")" || {
+        err "bundle runtime is incomplete"
+        return 1
+    }
+    [[ -f "$RUNTIME_ROOT/playbooks/site.yml" ]] || {
         err "bundle runtime is incomplete"
         return 1
     }
@@ -1225,10 +1588,10 @@ run_ansible() {
     while (( $# )); do
         case "$1" in
             --local|--here) [[ -z "$target_mode" ]] || { err "choose only one target mode"; return 2; }; target_mode=local; shift ;;
-            --inventory|-i) [[ $# -ge 2 ]] || { err "--inventory requires a path"; return 2; }; [[ -z "$target_mode" || "$target_mode" == inventory ]] || { err "choose only one target mode"; return 2; }; target_mode=inventory; inventory="$2"; shift 2 ;;
+            --inventory|-i) [[ $# -ge 2 ]] || { err "--inventory requires a path"; return 2; }; [[ -z "$target_mode" || "$target_mode" == inventory || "$target_mode" == host ]] || { err "choose only one target mode"; return 2; }; target_mode=inventory; inventory="$2"; shift 2 ;;
             --limit|-l) [[ $# -ge 2 ]] || { err "--limit requires a value"; return 2; }; limit="$2"; shift 2 ;;
             --all) all=true; shift ;;
-            --host) [[ $# -ge 2 ]] || { err "--host requires a value"; return 2; }; [[ -z "$target_mode" ]] || { err "choose only one target mode"; return 2; }; target_mode=host; host="$2"; shift 2 ;;
+            --host) [[ $# -ge 2 ]] || { err "--host requires a value"; return 2; }; [[ -z "$host" ]] || { err "--host may be specified only once"; return 2; }; [[ -z "$target_mode" || "$target_mode" == inventory ]] || { err "choose only one target mode"; return 2; }; [[ -n "$target_mode" ]] || target_mode=host; host="$2"; shift 2 ;;
             --user|-u) [[ $# -ge 2 ]] || { err "--user requires a value"; return 2; }; user="$2"; shift 2 ;;
             --port|-p) [[ $# -ge 2 ]] || { err "--port requires a value"; return 2; }; port="$2"; shift 2 ;;
             --identity) [[ $# -ge 2 ]] || { err "--identity requires a path"; return 2; }; identity="$2"; shift 2 ;;
@@ -1252,9 +1615,19 @@ run_ansible() {
         err "inventory runs require --limit or explicit --all"
         return 2
     fi
-    if [[ "$target_mode" != host && ( -n "$user" || -n "$port" || -n "$identity" || -n "$ssh_config" ) ]]; then
-        err "SSH options are accepted only with --host; put inventory SSH settings in host_vars"
+    if [[ -z "$host" && ( -n "$user" || -n "$port" || -n "$identity" || -n "$ssh_config" ) ]]; then
+        err "SSH options require --host"
         return 2
+    fi
+    if [[ -n "$user" && ! "$user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+        err "invalid SSH user"
+        return 2
+    fi
+    if [[ "$target_mode" == inventory && -n "$host" ]]; then
+        [[ "$all" != true && -n "$limit" ]] || {
+            err "an inventory SSH endpoint override requires one explicit --limit host"
+            return 2
+        }
     fi
 
     if [[ "$profile" == *.machstrap ]]; then
@@ -1283,12 +1656,33 @@ run_ansible() {
             command+=(--inventory "$inventory")
             [[ -n "$limit" ]] && command+=(--limit "$limit")
             target_description="$inventory (${limit:-all hosts})"
+            if [[ -n "$host" ]]; then
+                validate_host "$host" || { err "invalid SSH host: $host"; return 2; }
+                command+=(--extra-vars "machstrap_transient_endpoint=true" --extra-vars "ansible_host=$host")
+                [[ -n "$user" ]] && command+=(--extra-vars "ansible_user=$user")
+                if [[ -n "$port" ]]; then
+                    validate_port "$port" || { err "port must be between 1 and 65535"; return 2; }
+                    command+=(--extra-vars "ansible_port=$port")
+                fi
+                if [[ -n "$identity" ]]; then
+                    identity="$(canonical_file "$identity")" || { err "identity not found: $identity"; return 1; }
+                    command+=(--private-key "$identity" --extra-vars "ansible_ssh_private_key_file=$identity")
+                fi
+                if [[ -n "$ssh_config" ]]; then
+                    ssh_config="$(canonical_file "$ssh_config")" || { err "SSH config not found: $ssh_config"; return 1; }
+                    contains_control_characters "$ssh_config" && { err "SSH config path contains control characters"; return 2; }
+                    [[ "$ssh_config" != *"'"* ]] || { err "SSH config path may not contain a single quote"; return 2; }
+                    export ANSIBLE_SSH_ARGS="-F '$ssh_config'"
+                fi
+                target_description="$target_description via $host"
+                [[ -z "$user" ]] || target_description="$target_description as $user"
+                [[ -z "$port" ]] || target_description="$target_description:$port"
+            fi
             ;;
         host)
             validate_host "$host" || { err "invalid SSH host: $host"; return 2; }
             command+=(--inventory "$host,")
             if [[ -n "$user" ]]; then
-                [[ "$user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { err "invalid SSH user"; return 2; }
                 command+=(--user "$user")
             fi
             if [[ -n "$port" ]]; then
@@ -1360,7 +1754,8 @@ main() {
         update|upgrade) update_command "$@" ;;
         config) config_command "$@" ;;
         profiles) profiles_command "$@" ;;
-        init) init_profile "$@" ;;
+        inventories) inventories_command "$@" ;;
+        identities) identities_command "$@" ;;
         bundle) bundle_create "$@" ;;
         check|apply)
             if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then
