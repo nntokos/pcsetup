@@ -244,9 +244,14 @@ TASK [Apply one change] *******************************************************
 changed: [localhost]
 TASK [Skip irrelevant work] **************************************************
 skipping: [localhost]
+EVENTS
+    if [[ "${ANSIBLE_DISPLAY_SKIPPED_HOSTS:-}" == True ]]; then
+        printf '%s\n' "${MACHSTRAP_TEST_EXTRA_SKIPS:-}"
+    fi
+    cat <<'RECAP'
 PLAY RECAP *********************************************************************
 localhost                  : ok=2 changed=1 unreachable=0 failed=0 skipped=4 rescued=0 ignored=0
-EVENTS
+RECAP
 fi
 if [[ "${MACHSTRAP_TEST_NO_HOSTS:-}" == 1 ]]; then
     cat <<'NO_HOSTS'
@@ -291,6 +296,17 @@ PATH="$TEST_TMP/bin:$PATH" \
 grep -q '/playbooks/validate.yml' "$TEST_TMP/args" || fail "check playbook selection"
 grep -qx 'localhost,' "$TEST_TMP/args" || fail "local inventory"
 ok "wrapper invokes validation safely"
+
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/check-events-args" MACHSTRAP_TEST_EVENTS=1 \
+MACHSTRAP_TEST_EXTRA_SKIPS=$'skipping: [localhost]\nskipping: [localhost]\nskipping: [localhost]' \
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" check full-example --local > "$TEST_TMP/check-events-output"
+grep -q 'localhost — Skip irrelevant work (4 results)' "$TEST_TMP/check-events-output" ||
+    fail "check output did not list every skipped result"
+if grep -q 'results suppressed by Ansible compact output' "$TEST_TMP/check-events-output"; then
+    fail "check output still suppressed skipped results"
+fi
+ok "check reports every skipped result"
 
 set +e
 MACHSTRAP_TEST_CAPTURE="$TEST_TMP/no-hosts-args" MACHSTRAP_TEST_NO_HOSTS=1 \

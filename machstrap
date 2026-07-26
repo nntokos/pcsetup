@@ -1731,7 +1731,11 @@ run_ansible() {
     chmod 600 "$REPORT_TMP"
     started=$SECONDS
     set +e
-    "${command[@]}" 2>&1 | tee "$REPORT_TMP"
+    if [[ "$action" == check ]]; then
+        ANSIBLE_DISPLAY_SKIPPED_HOSTS=True "${command[@]}" 2>&1 | tee "$REPORT_TMP"
+    else
+        "${command[@]}" 2>&1 | tee "$REPORT_TMP"
+    fi
     ansible_status=${PIPESTATUS[0]}
     set -e
     if [[ "$ansible_status" -eq 0 ]] && grep -qx 'skipping: no hosts matched' "$REPORT_TMP"; then
