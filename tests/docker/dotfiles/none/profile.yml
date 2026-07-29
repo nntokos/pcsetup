@@ -1,0 +1,7 @@
+---
+machstrap_profile:
+  dotfiles_repo:
+    repo: file:///srv/git/dotfiles.git
+    path: ~/.dotfiles
+    branch: main
+    method: none

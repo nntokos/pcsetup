@@ -1,0 +1,23 @@
+---
+machstrap_profile:
+  hostname: {}
+  packages:
+    apt: [tree]
+    snap: []
+    brew: []
+    cask: []
+    pip: []
+  git_config: {}
+  git_repos: []
+  dotfiles: []
+  dotfile_sources: []
+  folder_sources: []
+  dotfiles_repo: {}
+  github_ssh: {enabled: false, email: "", key_type: ed25519}
+  ssh: {enabled: false, authorized_keys: [], allow_password: false, port: 22}
+  macos: {defaults: [], restart: []}
+  commands: []
+  static_network: {enabled: false}
+  firewall: {configured: false}
+  wireguard: {enabled: false}
+  plex: {enabled: false}

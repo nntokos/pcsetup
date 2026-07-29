@@ -1,0 +1,6 @@
+---
+- name: Record the macOS VM post-hook
+  ansible.builtin.copy:
+    dest: "{{ machstrap_home }}/.machstrap-post-hook"
+    content: "post\n"
+    mode: "0600"

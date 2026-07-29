@@ -1,0 +1,6 @@
+---
+- name: Record the Docker post-hook
+  ansible.builtin.copy:
+    dest: "{{ machstrap_home }}/.machstrap-post-hook"
+    content: "post-hook\n"
+    mode: "0600"

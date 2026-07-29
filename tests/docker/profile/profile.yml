@@ -1,0 +1,51 @@
+---
+machstrap_profile:
+  hostname: {}
+  packages:
+    apt: []
+    snap: []
+    brew: []
+    cask: []
+    pip: []
+  git_config:
+    user.name: Machstrap Integration
+    user.email: integration@example.invalid
+  git_repos:
+    - repo: file:///srv/git/fixture.git
+      path: ~/src/fixture
+      branch: main
+      depth: 1
+  dotfiles:
+    - path: ~/.machstrap-replace
+      mode: replace
+      block: replace
+      lines: [replace-line]
+    - path: ~/.machstrap-blocks
+      mode: prepend
+      block: prepend
+      lines: [first-line]
+    - path: ~/.machstrap-blocks
+      mode: append
+      block: append
+      lines: [last-line]
+  dotfile_sources:
+    - source: assets/copied.conf
+      destination: ~/.config/machstrap/copied.conf
+      mode: "0600"
+  folder_sources:
+    - source: assets/config
+      destination: ~/.config/machstrap-folder
+      directory_mode: "0700"
+  dotfiles_repo: {}
+  github_ssh: {enabled: false, email: "", key_type: ed25519}
+  ssh: {enabled: false, authorized_keys: [], allow_password: false, port: 22}
+  macos: {defaults: [], restart: []}
+  commands:
+    - command: "printf 'command\\n' > .machstrap-command"
+      chdir: "~"
+      creates: ~/.machstrap-command
+      no_log: false
+  static_network: {enabled: false}
+  firewall: {configured: false}
+  wireguard: {enabled: false}
+  plex: {enabled: false}

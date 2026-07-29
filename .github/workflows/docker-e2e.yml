@@ -1,0 +1,32 @@
+name: docker-e2e
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["22.04", "24.04"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install PTY test dependency
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - name: Run Docker SSH integration suite
+        run: ./tests/docker/run.sh "${{ matrix.ubuntu }}"
+      - name: Upload Docker lifecycle log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: docker-${{ matrix.ubuntu }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tests/logs
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,3 @@
+# os	url	sha256	filename
+ubuntu-22.04	https://cloud-images.ubuntu.com/releases/jammy/release/ubuntu-22.04-server-cloudimg-amd64.img	757908b2fd6d5b1431bb45070fc1f56cbf017d4025568d292ece37d9cc75e812	ubuntu-22.04-amd64.img
+ubuntu-24.04	https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img	d1940f7d69d343355e183dff1e08a59852d32e7309baa7a4bad8365b11b005ac	ubuntu-24.04-amd64.img

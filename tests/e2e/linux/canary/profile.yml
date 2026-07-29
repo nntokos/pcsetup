@@ -1,0 +1,40 @@
+---
+machstrap_profile:
+  hostname: {}
+  packages:
+    apt: [ca-certificates, curl, git]
+    snap: [hello-world]
+    brew: []
+    cask: []
+    pip: []
+  git_config: {}
+  git_repos:
+    - repo: "git@github.com:{{ github_canary_repo }}.git"
+      path: ~/src/github-canary
+      branch: main
+      depth: 1
+  dotfiles: []
+  dotfile_sources: []
+  folder_sources: []
+  dotfiles_repo: {}
+  github_ssh:
+    enabled: true
+    email: canary@example.invalid
+    key_type: ed25519
+  ssh: {enabled: false, authorized_keys: [], allow_password: false, port: 22}
+  macos: {defaults: [], restart: []}
+  commands: []
+  static_network: {enabled: false}
+  firewall: {configured: false}
+  wireguard: {enabled: false}
+  plex:
+    enabled: true
+    image: lscr.io/linuxserver/plex:latest
+    config_path: /srv/plex/config
+    transcode_path: /srv/plex/transcode
+    media_paths: [/srv/plex/media]
+    timezone: UTC
+    uid: 1000
+    gid: 1000
+    claim: ""
+    update_image: false

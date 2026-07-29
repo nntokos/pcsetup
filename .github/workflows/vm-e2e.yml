@@ -1,0 +1,85 @@
+name: vm-e2e
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * *"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    if: vars.MACHSTRAP_FULL_E2E_ENABLED == 'true'
+    runs-on: [self-hosted, linux, x64, machstrap-vm]
+    timeout-minutes: 120
+    concurrency:
+      group: machstrap-linux-vm
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        ubuntu: ["22.04", "24.04"]
+        sudo: [passwordless, password]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify coverage contract
+        run: ./tests/coverage/run.sh
+      - name: Prepare pinned Ubuntu images
+        run: ./tests/e2e/prepare-images.sh
+      - name: Run complete Linux VM suite
+        env:
+          MACHSTRAP_E2E_ARTIFACT_DIR: ${{ github.workspace }}/test-artifacts/linux-${{ matrix.ubuntu }}-${{ matrix.sudo }}
+        run: ./tests/e2e/run-linux.sh --os "${{ matrix.ubuntu }}" --sudo "${{ matrix.sudo }}"
+      - name: Upload sanitized Linux diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-${{ matrix.ubuntu }}-${{ matrix.sudo }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-artifacts/linux-${{ matrix.ubuntu }}-${{ matrix.sudo }}
+            tests/logs
+          if-no-files-found: ignore
+          retention-days: 14
+
+  macos:
+    if: vars.MACHSTRAP_FULL_E2E_ENABLED == 'true'
+    runs-on: [self-hosted, macOS, ARM64, machstrap-vm]
+    timeout-minutes: 120
+    concurrency:
+      group: machstrap-macos-vm
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        macos: ["15", "26"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify coverage contract
+        run: ./tests/coverage/run.sh
+      - name: Run complete macOS VM suite
+        env:
+          MACHSTRAP_TART_IMAGE_MACOS_15: ${{ vars.MACHSTRAP_TART_IMAGE_MACOS_15 }}
+          MACHSTRAP_TART_IMAGE_MACOS_26: ${{ vars.MACHSTRAP_TART_IMAGE_MACOS_26 }}
+          MACHSTRAP_TART_USER: ${{ vars.MACHSTRAP_TART_USER }}
+          MACHSTRAP_TART_PASSWORD: ${{ secrets.MACHSTRAP_TART_PASSWORD }}
+          MACHSTRAP_E2E_ARTIFACT_DIR: ${{ github.workspace }}/test-artifacts/macos-${{ matrix.macos }}
+        run: ./tests/e2e/run-macos.sh --os "${{ matrix.macos }}"
+      - name: Upload sanitized macOS diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-${{ matrix.macos }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-artifacts/macos-${{ matrix.macos }}
+            tests/logs
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,43 @@
+#!/usr/bin/expect -f
+
+if {$argc < 3} {
+    puts stderr "usage: pty-run.exp PROMPT SECRET_FILE COMMAND \[ARG ...\]"
+    exit 2
+}
+
+set prompt [lindex $argv 0]
+set secret_path [lindex $argv 1]
+set command [lrange $argv 2 end]
+set timeout 900
+
+set secret_handle [open $secret_path r]
+set secret [string trimright [gets $secret_handle] "\r\n"]
+close $secret_handle
+if {$secret eq ""} {
+    puts stderr "secret file is empty"
+    exit 2
+}
+
+set answered 0
+spawn -noecho {*}$command
+expect {
+    -exact $prompt {
+        send -- "$secret\r"
+        set answered 1
+        exp_continue
+    }
+    timeout {
+        puts stderr "PTY command timed out"
+        catch {close}
+        catch {wait}
+        exit 124
+    }
+    eof
+}
+
+set child_status [wait]
+if {!$answered} {
+    puts stderr "expected PTY prompt was not observed: $prompt"
+    exit 2
+}
+exit [lindex $child_status 3]

@@ -20,6 +20,161 @@ sh -n "$REPO_ROOT/install.sh"
 bash -n "$REPO_ROOT/machstrap" "$REPO_ROOT/quickstart.sh"
 ok "shell syntax"
 
+"$REPO_ROOT/tests/coverage/run.sh"
+ok "configuration and behavior coverage is complete"
+
+command -v expect >/dev/null 2>&1 ||
+    fail "Expect is required for portable interactive tests"
+for test_script in \
+    tests/coverage/run.sh \
+    tests/lib/lifecycle.sh \
+    tests/run-pre-push-tests.sh \
+    tests/run-unit-tests.sh \
+    tests/run-docker-tests.sh \
+    tests/run-linux-vm-tests.sh \
+    tests/run-macos-vm-tests.sh \
+    tests/run-canary-tests.sh \
+    tests/docker/run.sh \
+    tests/docker/entrypoint.sh \
+    tests/docker/verify-user.sh \
+    tests/e2e/prepare-images.sh \
+    tests/e2e/run-linux.sh \
+    tests/e2e/run-macos.sh \
+    tests/e2e/linux/verify.sh \
+    tests/e2e/macos/verify.sh; do
+    [[ -x "$REPO_ROOT/$test_script" ]] ||
+        fail "pipeline script is not executable: $test_script"
+    bash -n "$REPO_ROOT/$test_script"
+done
+[[ -x "$REPO_ROOT/tests/lib/pty-run.exp" ]] ||
+    fail "pipeline script is not executable: tests/lib/pty-run.exp"
+[[ -x "$REPO_ROOT/tests/lib/github-canary-run.exp" ]] ||
+    fail "pipeline script is not executable: tests/lib/github-canary-run.exp"
+[[ -x "$REPO_ROOT/.githooks/pre-push" ]] ||
+    fail "versioned pre-push hook is not executable"
+grep -q 'exec ./tests/run-pre-push-tests.sh' "$REPO_ROOT/.githooks/pre-push" ||
+    fail "versioned pre-push hook does not run the local CI gate"
+printf 'pty-test-secret\n' >"$TEST_TMP/pty-secret"
+chmod 0600 "$TEST_TMP/pty-secret"
+set +e
+expect "$REPO_ROOT/tests/lib/pty-run.exp" \
+    'BECOME password:' \
+    "$TEST_TMP/pty-secret" \
+    bash -c \
+    'stty -echo; printf "BECOME password:"; IFS= read -r value; stty echo; printf "\nreceived=[REDACTED]\n"; exit 7' \
+    >"$TEST_TMP/pty-output"
+pty_status=$?
+set -e
+[[ "$pty_status" -eq 7 ]] || fail "PTY helper did not preserve child status"
+grep -q 'received=\[REDACTED\]' "$TEST_TMP/pty-output" ||
+    fail "PTY helper did not relay and redact the secret"
+if grep -q 'pty-test-secret' "$TEST_TMP/pty-output"; then
+    fail "PTY helper exposed the supplied secret"
+fi
+ok "portable PTY prompt forwarding"
+set +e
+expect "$REPO_ROOT/tests/lib/github-canary-run.exp" \
+    bash -c \
+    'printf "Trust this GitHub SSH host key on machstrap-e2e [yes/no]"; IFS= read -r first; printf "\nGitHub action [upload/manual/abort]"; IFS= read -r second; printf "\nanswers=%s,%s\n" "$first" "$second"; [[ "$first" == yes && "$second" == upload ]]; exit 7' \
+    >"$TEST_TMP/canary-pty-output"
+canary_pty_status=$?
+set -e
+[[ "$canary_pty_status" -eq 7 ]] ||
+    fail "GitHub canary PTY helper did not preserve child status"
+grep -q 'answers=yes,upload' "$TEST_TMP/canary-pty-output" ||
+    fail "GitHub canary PTY helper did not answer both prompts"
+ok "GitHub canary PTY forwarding"
+for profile_file in \
+    tests/docker/profile/profile.yml \
+    tests/docker/system/profile.yml \
+    tests/docker/dotfiles/symlink/profile.yml \
+    tests/docker/dotfiles/stow/profile.yml \
+    tests/docker/dotfiles/script/profile.yml \
+    tests/docker/dotfiles/none/profile.yml \
+    tests/docker/vault/profile.yml \
+    tests/e2e/linux/profile/profile.yml \
+    tests/e2e/linux/canary/profile.yml \
+    tests/e2e/macos/profile/profile.yml; do
+    [[ -f "$REPO_ROOT/$profile_file" ]] ||
+        fail "pipeline profile is missing or incorrectly named: $profile_file"
+done
+if grep -q 'pull_request:' \
+    "$REPO_ROOT/.github/workflows/vm-e2e.yml" \
+    "$REPO_ROOT/.github/workflows/external-canary.yml"; then
+    fail "a privileged self-hosted workflow accepts pull requests"
+fi
+grep -q "MACHSTRAP_FULL_E2E_ENABLED == 'true'" \
+    "$REPO_ROOT/.github/workflows/vm-e2e.yml" ||
+    fail "full VM workflow is not gated"
+grep -q "MACHSTRAP_CANARY_ENABLED == 'true'" \
+    "$REPO_ROOT/.github/workflows/external-canary.yml" ||
+    fail "external canary workflow is not gated"
+grep -q 'runs-on: \[self-hosted, linux, x64, machstrap-vm\]' \
+    "$REPO_ROOT/.github/workflows/vm-e2e.yml" ||
+    fail "Linux VM jobs are not confined to the intended runner label"
+if grep -q -- '--privileged' "$REPO_ROOT/tests/docker/run.sh"; then
+    fail "Docker integration suite requests a privileged container"
+fi
+if grep -q 'machstrap-test-password' "$REPO_ROOT/tests/docker/Dockerfile"; then
+    fail "disposable password is embedded in Docker image history"
+fi
+grep -q 'docker rm -f "$CONTAINER"' "$REPO_ROOT/tests/docker/run.sh" ||
+    fail "Docker integration suite does not remove its exact container"
+grep -q 'docker image rm -f "$IMAGE"' "$REPO_ROOT/tests/docker/run.sh" ||
+    fail "Docker integration suite does not remove its exact image"
+grep -q 'virsh undefine "$domain_name"' \
+    "$REPO_ROOT/tests/e2e/run-linux.sh" ||
+    fail "Linux VM integration suite does not undefine its VMs"
+grep -q 'tart delete "$VM_NAME"' "$REPO_ROOT/tests/e2e/run-macos.sh" ||
+    fail "macOS VM integration suite does not delete its Tart VM"
+[[ -f "$REPO_ROOT/tests/logs/.gitignore" ]] ||
+    fail "sanitized test log directory is not configured"
+ok "integration pipeline security boundaries"
+
+grep -q 'Keep the Debian local hostname mapping synchronized' \
+    "$REPO_ROOT/roles/machstrap/tasks/hostname.yml" ||
+    fail "Debian hostname mapping protection missing"
+if grep -Eq 'machstrap-linux-(server|workstation)' \
+    "$REPO_ROOT/profiles/linux-server/profile.yml" \
+    "$REPO_ROOT/profiles/linux-workstation/profile.yml"; then
+    fail "reusable Linux profiles still force a shared hostname"
+fi
+ok "Linux hostname defaults and local resolution are safe"
+
+awk '
+    /^- name: / { name = substr($0, 9) }
+    /^[[:space:]]+become: true[[:space:]]*$/ {
+        print FILENAME " — " name
+    }
+' \
+    "$REPO_ROOT/playbooks/site.yml" \
+    "$REPO_ROOT/roles/machstrap/handlers/main.yml" \
+    "$REPO_ROOT"/roles/machstrap/tasks/*.yml \
+    | sed "s|$REPO_ROOT/||" \
+    | LC_ALL=C sort >"$TEST_TMP/privilege-surface"
+if ! cmp -s "$REPO_ROOT/tests/privilege-surface.txt" "$TEST_TMP/privilege-surface"; then
+    diff -u "$REPO_ROOT/tests/privilege-surface.txt" "$TEST_TMP/privilege-surface" >&2 || true
+    fail "task-scoped privilege surface changed without explicit review"
+fi
+if grep -Eq '^[[:space:]]+become:[[:space:]]+true[[:space:]]*$' \
+    "$REPO_ROOT/roles/machstrap/tasks/dotfiles.yml" \
+    "$REPO_ROOT/roles/machstrap/tasks/git.yml" \
+    "$REPO_ROOT/roles/machstrap/tasks/github-ssh.yml" \
+    "$REPO_ROOT/roles/machstrap/tasks/commands.yml" \
+    "$REPO_ROOT/roles/machstrap/tasks/macos.yml"; then
+    fail "user-scoped task file requested privilege escalation"
+fi
+ok "privilege escalation surface is explicit and reviewed"
+
+first_role_task="$(sed -n '/ansible.builtin.import_tasks:/ { s/.*import_tasks: //; p; q; }' \
+    "$REPO_ROOT/roles/machstrap/tasks/main.yml")"
+[[ "$first_role_task" == github-ssh.yml ]] ||
+    fail "GitHub identity preparation is not the first role task"
+grep -q 'ansible.builtin.import_tasks: git-preflight.yml' \
+    "$REPO_ROOT/roles/machstrap/tasks/main.yml" ||
+    fail "early Git repository access preflight missing"
+ok "Git access is checked before machine changes"
+
 "$REPO_ROOT/machstrap" --help > "$TEST_TMP/help"
 grep -q 'Manage configured and bundled profiles' "$TEST_TMP/help" || fail "profiles help text"
 grep -q 'machstrap profiles \[COMMAND\]' "$TEST_TMP/help" || fail "profiles help text"
@@ -46,6 +201,10 @@ set -e
 grep -q 'unknown command: init' "$TEST_TMP/retired-init-output" || fail "retired init diagnostic"
 "$REPO_ROOT/machstrap" apply --help > "$TEST_TMP/apply-help"
 grep -q '^Usage: machstrap apply PROFILE' "$TEST_TMP/apply-help" || fail "apply command help"
+grep -q -- '--ssh-plan' "$TEST_TMP/apply-help" || fail "apply SSH plan help"
+grep -q -- '--interactive' "$TEST_TMP/apply-help" || fail "apply interactive help"
+grep -q -- '--ask-sudo-pass' "$TEST_TMP/apply-help" ||
+    fail "apply sudo password help"
 "$REPO_ROOT/machstrap" update --help > "$TEST_TMP/update-help"
 grep -q '^Usage: machstrap update|upgrade' "$TEST_TMP/update-help" || fail "update command help"
 ok "command help"
@@ -221,6 +380,241 @@ set -e
 grep -q 'require --limit' "$TEST_TMP/no-limit" || fail "inventory limit message"
 ok "inventory limit required"
 
+mkdir -p "$TEST_TMP/unsafe-become-inventory"
+printf '%s\n' \
+    'all:' \
+    '  hosts:' \
+    '    unsafe-become:' \
+    '      ansible_connection: local' \
+    '      ansible_become: true' \
+    >"$TEST_TMP/unsafe-become-inventory/hosts.yml"
+set +e
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+"$REPO_ROOT/machstrap" check full-example \
+    --inventory "$TEST_TMP/unsafe-become-inventory/hosts.yml" \
+    --limit unsafe-become >"$TEST_TMP/unsafe-become-output" 2>&1
+status=$?
+set -e
+if [[ "$status" -ne 2 ]]; then
+    sed -n '1,120p' "$TEST_TMP/unsafe-become-output" >&2
+    fail "inventory-wide become returned status $status instead of 2"
+fi
+grep -q 'Do not set ansible_become in inventory' "$TEST_TMP/unsafe-become-output" ||
+    fail "inventory-wide become diagnostic"
+grep -Eq 'unsafe-become-inventory/hosts\.yml:[0-9]+:[0-9]+:' \
+    "$TEST_TMP/unsafe-become-output" ||
+    fail "inventory-wide become diagnostic omitted its source line"
+
+mkdir -p "$TEST_TMP/unsafe-become-vars/group_vars"
+printf '%s\n' \
+    'all:' \
+    '  hosts:' \
+    '    unsafe-vars:' \
+    '      ansible_connection: local' \
+    >"$TEST_TMP/unsafe-become-vars/hosts.yml"
+printf '%s\n' 'ansible_become: false' \
+    >"$TEST_TMP/unsafe-become-vars/group_vars/all.yml"
+set +e
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+"$REPO_ROOT/machstrap" check full-example \
+    --inventory "$TEST_TMP/unsafe-become-vars/hosts.yml" \
+    --limit unsafe-vars >"$TEST_TMP/unsafe-become-vars-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] ||
+    fail "inventory-wide become in group_vars returned status $status instead of 2"
+grep -Eq 'group_vars/all\.yml:[0-9]+:[0-9]+:' \
+    "$TEST_TMP/unsafe-become-vars-output" ||
+    fail "group_vars become diagnostic omitted its source line"
+ok "inventory-wide privilege escalation is rejected"
+
+mkdir -p "$TEST_TMP/snap-profile"
+printf '%s\n' \
+    'machstrap_profile:' \
+    '  packages:' \
+    '    snap:' \
+    '      - go' \
+    '      - name: code' \
+    >"$TEST_TMP/snap-profile/profile.yml"
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+"$REPO_ROOT/machstrap" check "$TEST_TMP/snap-profile" --local \
+    >"$TEST_TMP/snap-profile-output"
+grep -Fq 'MACHSTRAP REPORT — SUCCESS' "$TEST_TMP/snap-profile-output" ||
+    fail "Snap shorthand and optional mapping fields were not accepted"
+
+mkdir -p "$TEST_TMP/invalid-snap-profile"
+printf '%s\n' \
+    'machstrap_profile:' \
+    '  packages:' \
+    '    snap:' \
+    '      - name: code' \
+    '        classic: yes-please' \
+    >"$TEST_TMP/invalid-snap-profile/profile.yml"
+set +e
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+"$REPO_ROOT/machstrap" check "$TEST_TMP/invalid-snap-profile" --local \
+    >"$TEST_TMP/invalid-snap-profile-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "invalid Snap controls were accepted"
+grep -Eq 'invalid-snap-profile/profile\.yml:[0-9]+:[0-9]+:' \
+    "$TEST_TMP/invalid-snap-profile-output" ||
+    fail "invalid Snap diagnostic omitted its source line"
+grep -q 'optional non-empty channel and boolean classic' \
+    "$TEST_TMP/invalid-snap-profile-output" ||
+    fail "invalid Snap diagnostic omitted the expected schema"
+ok "Snap declarations accept shorthand and report malformed source"
+
+mkdir -p "$TEST_TMP/git-preflight/bin"
+cat >"$TEST_TMP/git-preflight/bin/git" <<'STUB'
+#!/usr/bin/env sh
+printf '%s|%s|%s\n' \
+    "${GIT_TERMINAL_PROMPT:-}" "${GIT_SSH_COMMAND:-}" "$*" \
+    >>"${MACHSTRAP_TEST_GIT_LOG:?}"
+if [ -n "${MACHSTRAP_TEST_GIT_MARKER:-}" ] && [ -f "$MACHSTRAP_TEST_GIT_MARKER" ]; then
+    exit 0
+fi
+printf '%s\n' "${MACHSTRAP_TEST_GIT_STDERR:-}" >&2
+exit "${MACHSTRAP_TEST_GIT_RC:-0}"
+STUB
+chmod +x "$TEST_TMP/git-preflight/bin/git"
+cat >"$TEST_TMP/git-preflight/play.yml" <<EOF
+---
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    machstrap_home: $TEST_TMP/git-preflight/target-home
+    machstrap_interactive: false
+    machstrap:
+      github_ssh:
+        enabled: true
+      git_repos:
+        - repo: git@github.com:private/project.git
+          path: ~/project
+          branch: main
+    machstrap_github_public_key_stat:
+      stat:
+        exists: true
+    machstrap_github_public_key:
+      content: c3NoLWVkMjU1MTkgQUFBQSB0ZXN0
+    machstrap_github_public_key_fingerprint:
+      stdout: 256 SHA256:test target-key
+  tasks:
+    - import_tasks: $REPO_ROOT/roles/machstrap/tasks/git-preflight.yml
+EOF
+set +e
+MACHSTRAP_TEST_GIT_LOG="$TEST_TMP/git-preflight/first-use.log" \
+PATH="$TEST_TMP/git-preflight/bin:$PATH" \
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+ansible-playbook -i localhost, "$TEST_TMP/git-preflight/play.yml" \
+    >"$TEST_TMP/git-preflight/first-use-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "non-interactive GitHub first use trusted a host key"
+grep -q 'GitHub SSH host-key confirmation is required' \
+    "$TEST_TMP/git-preflight/first-use-output" ||
+    fail "GitHub first-use failure omitted fingerprint confirmation guidance"
+grep -Fq 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' \
+    "$TEST_TMP/git-preflight/first-use-output" ||
+    fail "GitHub first-use failure omitted the pinned fingerprint"
+printf '%s\n' \
+    'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+    >"$TEST_TMP/git-preflight/target-home/.ssh/known_hosts"
+chmod 644 "$TEST_TMP/git-preflight/target-home/.ssh/known_hosts"
+ok "GitHub SSH first use requires explicit host-key confirmation"
+
+MACHSTRAP_TEST_GIT_LOG="$TEST_TMP/git-preflight/success.log" \
+PATH="$TEST_TMP/git-preflight/bin:$PATH" \
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+ansible-playbook -i localhost, "$TEST_TMP/git-preflight/play.yml" \
+    >"$TEST_TMP/git-preflight/success-output"
+grep -Fqx '0|ssh -o BatchMode=yes|ls-remote git@github.com:private/project.git HEAD' \
+    "$TEST_TMP/git-preflight/success.log" ||
+    fail "Git access preflight did not disable credential prompts"
+ssh-keygen -lf "$TEST_TMP/git-preflight/target-home/.ssh/known_hosts" \
+    >"$TEST_TMP/git-preflight/known-host-fingerprints"
+grep -Fq 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' \
+    "$TEST_TMP/git-preflight/known-host-fingerprints" ||
+    fail "GitHub's pinned Ed25519 host key was not installed"
+
+set +e
+MACHSTRAP_TEST_GIT_LOG="$TEST_TMP/git-preflight/failure.log" \
+MACHSTRAP_TEST_GIT_RC=128 \
+MACHSTRAP_TEST_GIT_STDERR='Permission denied (publickey).' \
+PATH="$TEST_TMP/git-preflight/bin:$PATH" \
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+ansible-playbook -i localhost, "$TEST_TMP/git-preflight/play.yml" \
+    >"$TEST_TMP/git-preflight/failure-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "inaccessible Git repository passed preflight"
+grep -q 'Git access preflight failed for git@github.com:private/project.git' \
+    "$TEST_TMP/git-preflight/failure-output" ||
+    fail "Git access preflight omitted the inaccessible repository"
+grep -q 'Re-run a real apply for one host from a usable terminal' \
+    "$TEST_TMP/git-preflight/failure-output" ||
+    fail "GitHub SSH failure omitted interactive remediation"
+ok "Git preflight is non-prompting and fails with GitHub remediation"
+
+cat >"$TEST_TMP/git-preflight/bin/gh" <<'STUB'
+#!/usr/bin/env sh
+if [ "${1:-}" = ssh-key ] && [ "${2:-}" = add ]; then
+    cp "$3" "${MACHSTRAP_TEST_GITHUB_UPLOADED_KEY:?}"
+    touch "${MACHSTRAP_TEST_GIT_MARKER:?}"
+    exit 0
+fi
+exit 1
+STUB
+chmod +x "$TEST_TMP/git-preflight/bin/gh"
+cat >"$TEST_TMP/git-preflight/upload-play.yml" <<EOF
+---
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    machstrap_interactive: true
+    machstrap_git_github_ssh_repairable: true
+    machstrap_git_can_prompt: true
+    machstrap_git_repository:
+      repo: git@github.com:private/project.git
+    machstrap_git_access_initial:
+      rc: 128
+      stderr: Permission denied (publickey).
+    machstrap_github_key_choice:
+      user_input: upload
+    machstrap_github_cli_account:
+      rc: 0
+      stdout: test-account
+    machstrap_github_public_key:
+      content: c3NoLWVkMjU1MTkgQUFBQSB0ZXN0
+    machstrap_github_public_key_fingerprint:
+      stdout: 256 SHA256:test target-key
+  tasks:
+    - import_tasks: $REPO_ROOT/roles/machstrap/tasks/git-preflight-repository.yml
+EOF
+MACHSTRAP_TEST_GIT_LOG="$TEST_TMP/git-preflight/upload.log" \
+MACHSTRAP_TEST_GIT_MARKER="$TEST_TMP/git-preflight/uploaded" \
+MACHSTRAP_TEST_GITHUB_UPLOADED_KEY="$TEST_TMP/git-preflight/uploaded.pub" \
+PATH="$TEST_TMP/git-preflight/bin:$PATH" \
+ANSIBLE_LOCAL_TEMP="$TEST_TMP/ansible-local" \
+ANSIBLE_REMOTE_TMP="$TEST_TMP/ansible-remote" \
+ansible-playbook -i localhost, "$TEST_TMP/git-preflight/upload-play.yml" \
+    --start-at-task 'Create a temporary public-key file on the controller' \
+    >"$TEST_TMP/git-preflight/upload-output"
+grep -qx 'ssh-ed25519 AAAA test' "$TEST_TMP/git-preflight/uploaded.pub" ||
+    fail "confirmed GitHub upload did not receive the target public key"
+grep -q 'failed=0' "$TEST_TMP/git-preflight/upload-output" ||
+    fail "Git access was not retried after confirmed GitHub upload"
+ok "confirmed GitHub upload stages only the public key and retries access"
+
 mkdir -p "$TEST_TMP/bin"
 cat > "$TEST_TMP/bin/ansible-playbook" <<'STUB'
 #!/usr/bin/env bash
@@ -235,6 +629,9 @@ fi
 printf '%s\n' "$@" > "${MACHSTRAP_TEST_CAPTURE:?}"
 if [[ -n "${MACHSTRAP_TEST_PROFILE_CAPTURE:-}" ]]; then
     printf '%s\n' "${MACHSTRAP_PROFILE_FILE:-}" >"$MACHSTRAP_TEST_PROFILE_CAPTURE"
+fi
+if [[ -n "${MACHSTRAP_TEST_SSH_ARGS_CAPTURE:-}" ]]; then
+    printf '%s\n' "${ANSIBLE_SSH_ARGS:-}" >"$MACHSTRAP_TEST_SSH_ARGS_CAPTURE"
 fi
 if [[ "${MACHSTRAP_TEST_EVENTS:-}" == 1 ]]; then
     cat <<'EVENTS'
@@ -268,6 +665,16 @@ fatal: [localhost]: FAILED! => {"changed": false, "msg": "expected test failure"
 FAILURE
     exit 3
 fi
+if [[ "${MACHSTRAP_TEST_HOST_KEY_FAIL:-}" == 1 ]]; then
+    cat <<'HOST_KEY_FAILURE'
+TASK [Gather target facts] *****************************************************
+fatal: [server.example]: UNREACHABLE! => {"changed": false, "msg": "Failed to connect to the host via ssh: ssh_askpass: unavailable\r\nHost key verification failed.", "unreachable": true}
+
+PLAY RECAP *********************************************************************
+server.example            : ok=0 changed=0 unreachable=1 failed=0 skipped=0 rescued=0 ignored=0
+HOST_KEY_FAILURE
+    exit 4
+fi
 STUB
 chmod +x "$TEST_TMP/bin/ansible-playbook"
 
@@ -295,6 +702,10 @@ PATH="$TEST_TMP/bin:$PATH" \
 "$REPO_ROOT/machstrap" check full-example --local
 grep -q '/playbooks/validate.yml' "$TEST_TMP/args" || fail "check playbook selection"
 grep -qx 'localhost,' "$TEST_TMP/args" || fail "local inventory"
+grep -qx 'machstrap_interactive=false' "$TEST_TMP/args" ||
+    fail "wrapper did not explicitly disable Ansible interaction"
+grep -qx 'machstrap_prompt_available=false' "$TEST_TMP/args" ||
+    fail "redirected validation unexpectedly enabled Ansible prompts"
 ok "wrapper invokes validation safely"
 
 MACHSTRAP_TEST_CAPTURE="$TEST_TMP/check-events-args" MACHSTRAP_TEST_EVENTS=1 \
@@ -409,6 +820,101 @@ grep -q 'MACHSTRAP REPORT — FAILED' "$TEST_TMP/failure-output" || fail "failed
 grep -q 'FAILED (1)' "$TEST_TMP/failure-output" || fail "failed task report section"
 ok "failure report and exit status"
 
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/ask-pass-args" \
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" apply full-example --host server.example --ask-pass
+grep -qx -- '--ask-pass' "$TEST_TMP/ask-pass-args" ||
+    fail "SSH password prompt was not forwarded"
+ok "SSH password prompting is forwarded"
+
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/ask-sudo-pass-args" \
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" apply full-example --host server.example --ask-sudo-pass
+grep -qx -- '--ask-become-pass' "$TEST_TMP/ask-sudo-pass-args" ||
+    fail "sudo password prompt was not forwarded"
+ok "sudo password prompting has an explicit interface"
+
+set +e
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" apply full-example --host server.example --interactive \
+    >"$TEST_TMP/noninteractive-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "interactive mode accepted redirected streams"
+grep -q 'requires a usable interactive terminal' \
+    "$TEST_TMP/noninteractive-output" ||
+    fail "interactive mode missing terminal diagnostic"
+ok "interactive mode requires a usable terminal"
+
+set +e
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" apply full-example --host server.example --ssh-preflight \
+    >"$TEST_TMP/noninteractive-preflight-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "SSH preflight accepted redirected streams"
+grep -q 'requires a usable interactive terminal' \
+    "$TEST_TMP/noninteractive-preflight-output" ||
+    fail "SSH preflight missing terminal diagnostic"
+ok "SSH preflight requires a usable terminal"
+
+cat >"$TEST_TMP/plan-ssh-config" <<EOF
+Host server.example
+    User cc
+    Port 2222
+    IdentityFile $TEST_TMP/identity-from-config
+EOF
+touch "$TEST_TMP/identity-from-config"
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" apply full-example --host server.example \
+    --ssh-config "$TEST_TMP/plan-ssh-config" --ssh-plan \
+    >"$TEST_TMP/ssh-plan-output"
+grep -q '^SSH CONNECTION PLAN' "$TEST_TMP/ssh-plan-output" ||
+    fail "SSH plan heading"
+grep -q '^  User:           cc$' "$TEST_TMP/ssh-plan-output" ||
+    fail "SSH plan did not resolve config user"
+grep -q '^  Port:           2222$' "$TEST_TMP/ssh-plan-output" ||
+    fail "SSH plan did not resolve config port"
+grep -Fq "identityfile $TEST_TMP/identity-from-config" "$TEST_TMP/ssh-plan-output" ||
+    fail "SSH plan did not resolve config identity"
+ok "SSH plan resolves OpenSSH configuration without connecting"
+
+cat >"$TEST_TMP/invalid-ssh-config" <<'EOF'
+NotARealOpenSSHDirective yes
+EOF
+set +e
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" apply full-example --host server.example \
+    --ssh-config "$TEST_TMP/invalid-ssh-config" --ssh-plan \
+    >"$TEST_TMP/invalid-ssh-plan-output" 2>&1
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || fail "invalid SSH configuration status"
+grep -q 'OpenSSH could not resolve connection settings for: server.example' \
+    "$TEST_TMP/invalid-ssh-plan-output" ||
+    fail "invalid SSH configuration missing endpoint"
+grep -q 'OpenSSH: .*Bad configuration option' "$TEST_TMP/invalid-ssh-plan-output" ||
+    fail "invalid SSH configuration suppressed OpenSSH diagnostic"
+ok "SSH plan preserves safe OpenSSH parser diagnostics"
+
+set +e
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/host-key-args" MACHSTRAP_TEST_HOST_KEY_FAIL=1 \
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" apply full-example --host server.example \
+    >"$TEST_TMP/host-key-output"
+status=$?
+set -e
+[[ "$status" -eq 4 ]] || fail "host-key failure exit status was not preserved"
+grep -q 'UNREACHABLE (1)' "$TEST_TMP/host-key-output" ||
+    fail "host-key failure missing unreachable report"
+grep -q 'SSH HOST KEY ACTION REQUIRED' "$TEST_TMP/host-key-output" ||
+    fail "host-key failure missing targeted guidance"
+grep -q 'ssh_askpass message is secondary' "$TEST_TMP/host-key-output" ||
+    fail "host-key failure did not explain askpass"
+grep -q 'will not disable' "$TEST_TMP/host-key-output" ||
+    fail "host-key guidance weakened verification"
+ok "host-key failures receive safe remediation guidance"
+
 touch "$TEST_TMP/identity"
 chmod 600 "$TEST_TMP/identity"
 identity_real="$(cd "$(dirname "$TEST_TMP/identity")" && pwd -P)/identity"
@@ -420,6 +926,23 @@ grep -qx 'server.example,' "$TEST_TMP/ssh-args" || fail "ad-hoc inventory"
 grep -qx 'ansible_port=2222' "$TEST_TMP/ssh-args" || fail "ad-hoc SSH port"
 grep -qx "$identity_real" "$TEST_TMP/ssh-args" || fail "ad-hoc identity"
 ok "typed ad-hoc SSH options"
+
+mkdir -p "$TEST_TMP/ssh config"
+touch "$TEST_TMP/ssh config/config"
+ssh_config_real="$(cd "$TEST_TMP/ssh config" && pwd -P)/config"
+MACHSTRAP_TEST_CAPTURE="$TEST_TMP/inventory-config-args" \
+MACHSTRAP_TEST_SSH_ARGS_CAPTURE="$TEST_TMP/inventory-config-env" \
+PATH="$TEST_TMP/bin:$PATH" \
+"$REPO_ROOT/machstrap" check full-example \
+    --inventory "$REPO_ROOT/inventories/example/hosts.yml" --limit example-server \
+    --ssh-config "$TEST_TMP/ssh config/config"
+grep -qx "$REPO_ROOT/inventories/example/hosts.yml" "$TEST_TMP/inventory-config-args" ||
+    fail "inventory SSH config lost inventory"
+grep -qx "example-server" "$TEST_TMP/inventory-config-args" ||
+    fail "inventory SSH config lost limit"
+grep -Fqx -- "-F '$ssh_config_real'" "$TEST_TMP/inventory-config-env" ||
+    fail "inventory SSH config was not passed to Ansible"
+ok "inventory supports a selected SSH config"
 
 MACHSTRAP_TEST_CAPTURE="$TEST_TMP/inventory-ssh-args" \
 PATH="$TEST_TMP/bin:$PATH" \

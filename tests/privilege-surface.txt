@@ -1,0 +1,38 @@
+playbooks/site.yml — Converge machines with machstrap
+roles/machstrap/handlers/main.yml — Restart Plex
+roles/machstrap/handlers/main.yml — Restart SSH
+roles/machstrap/handlers/main.yml — Restart WireGuard
+roles/machstrap/tasks/firewall.yml — Add explicit firewall rules
+roles/machstrap/tasks/firewall.yml — Install UFW
+roles/machstrap/tasks/firewall.yml — Set the incoming firewall policy
+roles/machstrap/tasks/firewall.yml — Set the outgoing firewall policy
+roles/machstrap/tasks/firewall.yml — Set the requested UFW state
+roles/machstrap/tasks/hostname.yml — Keep the Debian local hostname mapping synchronized
+roles/machstrap/tasks/hostname.yml — Set Linux hostname
+roles/machstrap/tasks/hostname.yml — Set macOS machine names
+roles/machstrap/tasks/hostname.yml — Verify the Debian hostname resolves locally
+roles/machstrap/tasks/packages.yml — Install APT packages
+roles/machstrap/tasks/packages.yml — Install missing Snap packages
+roles/machstrap/tasks/plex.yml — Check for the Plex image
+roles/machstrap/tasks/plex.yml — Create Plex storage directories
+roles/machstrap/tasks/plex.yml — Enable Docker
+roles/machstrap/tasks/plex.yml — Enable Plex
+roles/machstrap/tasks/plex.yml — Install Docker
+roles/machstrap/tasks/plex.yml — Install the Plex systemd unit
+roles/machstrap/tasks/plex.yml — Pull the configured Plex image
+roles/machstrap/tasks/plex.yml — Write the private Plex environment
+roles/machstrap/tasks/ssh.yml — Configure sshd safely through a drop-in
+roles/machstrap/tasks/ssh.yml — Enable the SSH service
+roles/machstrap/tasks/ssh.yml — Install the OpenSSH server
+roles/machstrap/tasks/static-network.yml — Install Netplan
+roles/machstrap/tasks/static-network.yml — Install and validate the guarded Netplan override
+roles/machstrap/tasks/wireguard.yml — Check whether the server private key exists
+roles/machstrap/tasks/wireguard.yml — Derive the server public key
+roles/machstrap/tasks/wireguard.yml — Enable IPv4 forwarding
+roles/machstrap/tasks/wireguard.yml — Enable the WireGuard service
+roles/machstrap/tasks/wireguard.yml — Ensure the WireGuard directory exists
+roles/machstrap/tasks/wireguard.yml — Generate the server private key once
+roles/machstrap/tasks/wireguard.yml — Install WireGuard and iptables
+roles/machstrap/tasks/wireguard.yml — Load forwarding settings
+roles/machstrap/tasks/wireguard.yml — Read the server private key
+roles/machstrap/tasks/wireguard.yml — Write the WireGuard server configuration
