@@ -1,8 +1,8 @@
 ---
 # Safe Linux workstation starting point.
 machstrap_profile:
-  hostname:
-    hostname: machstrap-linux-workstation
+  # Set a unique hostname in inventory rather than sharing one across machines.
+  hostname: {}
   packages:
     apt: [git, curl, ca-certificates, ripgrep, tmux, vim]
     snap: []

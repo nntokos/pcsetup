@@ -6,6 +6,16 @@
     - ../config/defaults.yml
 
   pre_tasks:
+    - name: Reject inventory-wide privilege escalation
+      ansible.builtin.assert:
+        that: ansible_become is not defined
+        fail_msg: >-
+          Do not set ansible_become in inventory. Machstrap escalates only the
+          individual system tasks that require it; inventory-wide become would
+          redirect user files, repositories, SSH keys, and facts to the
+          privileged account. Remove ansible_become and rerun.
+      tags: [always]
+
     - name: Require exactly one selected host for a transient endpoint override
       ansible.builtin.assert:
         that: ansible_play_hosts_all | length == 1
@@ -22,6 +32,34 @@
     - name: Load and validate the selected profile
       ansible.builtin.import_tasks: load-profile.yml
       tags: [always]
+
+    - name: Explain the task-scoped privilege boundary
+      ansible.builtin.debug:
+        msg: >-
+          User files, repositories, and SSH keys run as
+          {{ ansible_facts.user_id }} with home {{ machstrap_home }}.
+          Only selected system tasks elevate with sudo.
+      tags: [always]
+
+    - name: Verify sudo access for selected system changes
+      ansible.builtin.command:
+        argv: [/usr/bin/true]
+      become: true
+      changed_when: false
+      check_mode: false
+      when: >-
+        (machstrap_is_linux and (
+          machstrap.hostname | length > 0
+          or machstrap.packages.apt | length > 0
+          or machstrap.packages.snap | length > 0
+          or machstrap.ssh.enabled | default(false) | bool
+          or machstrap.static_network.enabled | default(false) | bool
+          or machstrap.firewall.configured | default(false) | bool
+          or machstrap.wireguard.enabled | default(false) | bool
+          or machstrap.plex.enabled | default(false) | bool
+        ))
+        or (machstrap_is_macos and machstrap.hostname | length > 0)
+      tags: [hostname, packages, ssh, network, firewall, wireguard, plex]
 
     - name: Check for a profile pre-hook
       ansible.builtin.stat:

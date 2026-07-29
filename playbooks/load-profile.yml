@@ -19,7 +19,21 @@
       - machstrap_profile_document is mapping
       - machstrap_profile_document.keys() | difference(['machstrap_profile']) | length == 0
       - machstrap_profile_document.machstrap_profile is mapping
-    fail_msg: The profile file must contain only a machstrap_profile mapping.
+    fail_msg: >-
+      Invalid profile YAML in
+      {{ lookup('ansible.builtin.env', 'MACHSTRAP_PROFILE_FILE') }}:
+      the file must contain only a machstrap_profile mapping.
+
+- name: Validate profile inline dotfiles collection type
+  ansible.builtin.assert:
+    that:
+      - >-
+        machstrap_profile_document.machstrap_profile.dotfiles is not defined or
+        (machstrap_profile_document.machstrap_profile.dotfiles | type_debug == 'list')
+    fail_msg: >-
+      Invalid machstrap_profile.dotfiles in
+      {{ lookup('ansible.builtin.env', 'MACHSTRAP_PROFILE_FILE') }}:
+      expected a YAML list of inline dotfile operations.
 
 - name: Validate inventory overrides
   ansible.builtin.assert:
@@ -27,6 +41,45 @@
       - machstrap_overrides | default({}) is mapping
       - machstrap_vault_overrides | default({}) is mapping
     fail_msg: machstrap_overrides and machstrap_vault_overrides must be mappings.
+
+- name: Validate inventory inline dotfiles override type
+  ansible.builtin.assert:
+    that:
+      - >-
+        machstrap_overrides.dotfiles is not defined or
+        (machstrap_overrides.dotfiles | type_debug == 'list')
+    fail_msg: >-
+      Invalid machstrap_overrides.dotfiles for inventory host
+      {{ inventory_hostname }} (inventory source:
+      {{ ansible_inventory_sources | default(['unknown']) | join(', ') }}):
+      expected a YAML list of inline dotfile operations.
+
+- name: Validate Vault inline dotfiles override type
+  ansible.builtin.assert:
+    that:
+      - >-
+        machstrap_vault_overrides.dotfiles is not defined or
+        (machstrap_vault_overrides.dotfiles | type_debug == 'list')
+    fail_msg: >-
+      Invalid machstrap_vault_overrides.dotfiles for inventory host
+      {{ inventory_hostname }} (inventory source:
+      {{ ansible_inventory_sources | default(['unknown']) | join(', ') }}):
+      expected a YAML list of inline dotfile operations.
+
+- name: Identify the effective inline dotfiles source
+  ansible.builtin.set_fact:
+    machstrap_dotfiles_source: >-
+      {% if machstrap_vault_overrides.dotfiles is defined %}
+      machstrap_vault_overrides for inventory host {{ inventory_hostname }}
+      (inventory source: {{ ansible_inventory_sources | default(['unknown']) | join(', ') }})
+      {% elif machstrap_overrides.dotfiles is defined %}
+      machstrap_overrides for inventory host {{ inventory_hostname }}
+      (inventory source: {{ ansible_inventory_sources | default(['unknown']) | join(', ') }})
+      {% elif machstrap_profile_document.machstrap_profile.dotfiles is defined %}
+      {{ lookup('ansible.builtin.env', 'MACHSTRAP_PROFILE_FILE') }}
+      {% else %}
+      {{ playbook_dir }}/../config/defaults.yml
+      {% endif %}
 
 - name: Merge defaults, profile, and inventory overrides
   ansible.builtin.set_fact:

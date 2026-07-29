@@ -201,6 +201,16 @@ render_run_report() {
                 rescued_total + 0, ignored_total + 0
         }
     ' "$log"
+    if grep -Fq 'Host key verification failed.' "$log"; then
+        printf '\n  SSH HOST KEY ACTION REQUIRED\n'
+        printf '    The ssh_askpass message is secondary: this non-interactive run\n'
+        printf '    could not prompt to trust the host key. Verify the target fingerprint\n'
+        printf '    through a trusted channel, then connect once with OpenSSH using the\n'
+        printf '    same host and SSH config to record it in known_hosts.\n'
+        printf '    If the host was rebuilt, replace only its stale known_hosts entry\n'
+        printf '    after confirming the new fingerprint. Machstrap will not disable\n'
+        printf '    host-key checking or accept an unverified key.\n'
+    fi
 }
 
 usage() {
@@ -237,17 +247,23 @@ Target modes:
   --inventory PATH --limit HOST --host HOST [SSH options]
                                     Apply one inventory host using a transient SSH endpoint
 
-SSH options (with ad-hoc --host or an inventory endpoint override):
+SSH endpoint options (with ad-hoc --host or an inventory endpoint override):
   --user USER
   --port PORT
   --identity PATH
+
+SSH transport options (with --inventory or --host):
   --ssh-config PATH
 
 Execution options:
   --dry-run, --check                 Preview without applying changes
   --diff
-  --ask-become-pass
+  --ask-pass
+  --ask-sudo-pass, --ask-become-pass
   --ask-vault-pass
+  --interactive, --forward-all       Enable all password prompts and SSH interaction
+  --ssh-plan                         Show the resolved SSH connection without connecting
+  --ssh-preflight                    Check the interactive SSH handshake without applying
   --vault-password-file PATH
   --tags TAGS
   --skip-tags TAGS
@@ -354,16 +370,20 @@ Usage: machstrap $action PROFILE [target options] [execution options]
 
 Target options (choose one):
   --local, --here
-  --inventory PATH --limit PATTERN
-  --inventory PATH --all
+  --inventory PATH --limit PATTERN [--ssh-config PATH]
+  --inventory PATH --all [--ssh-config PATH]
   --host HOST [--user USER] [--port PORT] [--identity PATH] [--ssh-config PATH]
   --inventory PATH --limit HOST --host HOST [--user USER] [--port PORT] [--identity PATH] [--ssh-config PATH]
 
 Execution options:
   --dry-run, --check  Preview changes without applying them
   --diff
-  --ask-become-pass
+  --ask-pass
+  --ask-sudo-pass, --ask-become-pass
   --ask-vault-pass
+  --interactive, --forward-all
+  --ssh-plan
+  --ssh-preflight
   --vault-password-file PATH
   --tags TAGS
   --skip-tags TAGS
@@ -770,7 +790,7 @@ except ImportError:
 path, label = sys.argv[1:]
 try:
     with open(path, encoding="utf-8") as profile:
-        yaml.compose(profile)
+        document = yaml.compose(profile)
 except yaml.YAMLError as error:
     mark = getattr(error, "problem_mark", None)
     if mark is not None:
@@ -781,6 +801,157 @@ except yaml.YAMLError as error:
     else:
         print(f"machstrap: error: invalid YAML in {label}: {path}: {error}", file=sys.stderr)
     raise SystemExit(2)
+
+
+def mapping_value(node, name):
+    if not isinstance(node, yaml.MappingNode):
+        return None
+    for key, value in node.value:
+        if isinstance(key, yaml.ScalarNode) and key.value == name:
+            return value
+    return None
+
+
+def source_error(node, field, problem):
+    mark = node.start_mark
+    print(
+        f"machstrap: error: invalid {field} in {label}: "
+        f"{path}:{mark.line + 1}:{mark.column + 1}: {problem}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def is_string(node):
+    return (
+        isinstance(node, yaml.ScalarNode)
+        and node.tag == "tag:yaml.org,2002:str"
+    )
+
+
+def validate_dotfiles(node, field):
+    if node is None:
+        return
+    if not isinstance(node, yaml.SequenceNode):
+        source_error(node, field, "expected a YAML list")
+    allowed = {"path", "mode", "block", "lines"}
+    for index, operation in enumerate(node.value, start=1):
+        if not isinstance(operation, yaml.MappingNode):
+            source_error(
+                operation,
+                f"{field}[{index}]",
+                "expected a mapping with path, mode, block, and lines",
+            )
+        keys = {
+            key.value
+            for key, _ in operation.value
+            if isinstance(key, yaml.ScalarNode)
+        }
+        operation_path = mapping_value(operation, "path")
+        mode = mapping_value(operation, "mode")
+        block = mapping_value(operation, "block")
+        lines = mapping_value(operation, "lines")
+        valid = (
+            all(isinstance(key, yaml.ScalarNode) for key, _ in operation.value)
+            and keys <= allowed
+            and is_string(operation_path)
+            and operation_path.value.startswith("~/")
+            and is_string(mode)
+            and mode.value in {"append", "prepend", "replace"}
+            and is_string(block)
+            and len(block.value) > 0
+            and isinstance(lines, yaml.SequenceNode)
+        )
+        if not valid:
+            source_error(
+                operation,
+                f"{field}[{index}]",
+                "expected path under ~/, mode append/prepend/replace, "
+                "a stable non-empty block, and a lines list",
+            )
+
+
+def validate_snap_packages(node, field):
+    if node is None:
+        return
+    if not isinstance(node, yaml.SequenceNode):
+        source_error(node, field, "expected a YAML list")
+    allowed = {"name", "channel", "classic"}
+    for index, package in enumerate(node.value, start=1):
+        package_field = f"{field}[{index}]"
+        if is_string(package):
+            if len(package.value) == 0:
+                source_error(package, package_field, "package name must not be empty")
+            continue
+        if not isinstance(package, yaml.MappingNode):
+            source_error(
+                package,
+                package_field,
+                "expected a package-name string or mapping",
+            )
+        keys = {
+            key.value
+            for key, _ in package.value
+            if isinstance(key, yaml.ScalarNode)
+        }
+        name = mapping_value(package, "name")
+        channel = mapping_value(package, "channel")
+        classic = mapping_value(package, "classic")
+        valid = (
+            all(isinstance(key, yaml.ScalarNode) for key, _ in package.value)
+            and keys <= allowed
+            and is_string(name)
+            and len(name.value) > 0
+            and (channel is None or (is_string(channel) and len(channel.value) > 0))
+            and (
+                classic is None
+                or (
+                    isinstance(classic, yaml.ScalarNode)
+                    and classic.tag == "tag:yaml.org,2002:bool"
+                )
+            )
+        )
+        if not valid:
+            source_error(
+                package,
+                package_field,
+                "expected a non-empty name and optional non-empty channel "
+                "and boolean classic",
+            )
+
+
+profile = mapping_value(document, "machstrap_profile")
+validate_dotfiles(mapping_value(profile, "dotfiles"), "machstrap_profile.dotfiles")
+profile_packages = mapping_value(profile, "packages")
+validate_snap_packages(
+    mapping_value(profile_packages, "snap"),
+    "machstrap_profile.packages.snap",
+)
+
+
+def validate_override_nodes(node):
+    if isinstance(node, yaml.MappingNode):
+        for key, value in node.value:
+            if (
+                isinstance(key, yaml.ScalarNode)
+                and key.value in {"machstrap_overrides", "machstrap_vault_overrides"}
+            ):
+                validate_dotfiles(
+                    mapping_value(value, "dotfiles"),
+                    f"{key.value}.dotfiles",
+                )
+                packages = mapping_value(value, "packages")
+                validate_snap_packages(
+                    mapping_value(packages, "snap"),
+                    f"{key.value}.packages.snap",
+                )
+            validate_override_nodes(value)
+    elif isinstance(node, yaml.SequenceNode):
+        for value in node.value:
+            validate_override_nodes(value)
+
+
+validate_override_nodes(document)
 PY
 }
 
@@ -1577,13 +1748,246 @@ extract_bundle() {
     resolve_profile "$RUNTIME_ROOT/profiles/bundled"
 }
 
+interactive_terminal_available() {
+    [[ -t 0 && -t 1 && -t 2 ]] || return 1
+    ( : </dev/tty >/dev/tty ) 2>/dev/null
+}
+
+inventory_ssh_record() {
+    local inventory="$1" limit="$2" vault_file="$3" ask_vault="$4"
+    local interpreter inventory_json status
+    local -a inventory_command
+    interpreter="$(ansible_python_interpreter)" || return 1
+    inventory_json="$(mktemp "${TMPDIR:-/tmp}/machstrap-inventory.XXXXXX")"
+    chmod 600 "$inventory_json"
+    inventory_command=(ansible-inventory --inventory "$inventory" --list --limit "$limit")
+    [[ -z "$vault_file" ]] || inventory_command+=(--vault-password-file "$vault_file")
+    [[ "$ask_vault" != true ]] || inventory_command+=(--ask-vault-pass)
+    set +e
+    ANSIBLE_CONFIG="$RUNTIME_ROOT/ansible.cfg" \
+    ANSIBLE_LOCAL_TEMP="${ANSIBLE_LOCAL_TEMP:-${TMPDIR:-/tmp}}" \
+        "${inventory_command[@]}" >"$inventory_json"
+    status=$?
+    set -e
+    if (( status != 0 )); then
+        rm -f -- "$inventory_json"
+        return "$status"
+    fi
+    set +e
+    "$interpreter" - "$inventory_json" "$inventory" <<'PY'
+import json
+import os
+import re
+import shlex
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        inventory = json.load(source)
+except (ValueError, OSError):
+    raise SystemExit(1)
+
+hostvars = inventory.get("_meta", {}).get("hostvars", {})
+if len(hostvars) != 1:
+    raise SystemExit(1)
+
+name, variables = next(iter(hostvars.items()))
+inventory_file = os.path.realpath(sys.argv[2])
+inventory_dir = os.path.dirname(inventory_file)
+values = [
+    name,
+    variables.get("ansible_host", variables.get("ansible_ssh_host", name)),
+    variables.get("ansible_user", variables.get("ansible_ssh_user", "")),
+    variables.get("ansible_port", variables.get("ansible_ssh_port", "")),
+    variables.get(
+        "ansible_ssh_private_key_file",
+        variables.get("ansible_private_key_file", ""),
+    ),
+]
+for value in values:
+    value = str(value)
+    if any(character in value for character in "\r\n\t"):
+        raise SystemExit(1)
+    print(value)
+for variable in (
+    "ansible_ssh_args",
+    "ansible_ssh_common_args",
+    "ansible_ssh_extra_args",
+):
+    raw_arguments = str(variables.get(variable, ""))
+    raw_arguments = re.sub(
+        r"{{\s*inventory_dir\s*}}",
+        inventory_dir,
+        raw_arguments,
+    )
+    raw_arguments = re.sub(
+        r"{{\s*inventory_file\s*}}",
+        inventory_file,
+        raw_arguments,
+    )
+    if any(token in raw_arguments for token in ("{{", "}}", "{%", "%}")):
+        print(f"UNRESOLVED:{variable}")
+        continue
+    for argument in shlex.split(raw_arguments):
+        if any(character in argument for character in "\r\n\t"):
+            raise SystemExit(1)
+        print(f"ARG:{argument}")
+print("MACHSTRAP_SSH_RECORD")
+PY
+    status=$?
+    set -e
+    rm -f -- "$inventory_json"
+    return "$status"
+}
+
+resolved_ssh_plan() {
+    local inventory_host="$1" endpoint="$2" user="$3" port="$4" identity="$5" ssh_config="$6" show="$7"
+    local line key value effective_host="" effective_user="" effective_port=""
+    local strict="" host_key_alias="" known_hosts="" global_known_hosts=""
+    local plan_output plan_error ssh_status inventory_config="" argument_index
+    local -a ssh_arguments effective_lines
+    ssh_arguments=()
+    effective_lines=()
+    [[ -z "$ssh_config" ]] || ssh_arguments+=(-F "$ssh_config")
+    [[ -z "$user" ]] || ssh_arguments+=(-l "$user")
+    [[ -z "$port" ]] || ssh_arguments+=(-p "$port")
+    [[ -z "$identity" ]] || ssh_arguments+=(-i "$identity")
+    ssh_arguments+=("${ssh_inventory_args[@]}")
+    for (( argument_index=0; argument_index<${#ssh_inventory_args[@]}; argument_index++ )); do
+        case "${ssh_inventory_args[$argument_index]}" in
+            -F)
+                if (( argument_index + 1 < ${#ssh_inventory_args[@]} )); then
+                    inventory_config="${ssh_inventory_args[$((argument_index + 1))]}"
+                fi
+                ;;
+            -F?*) inventory_config="${ssh_inventory_args[$argument_index]#-F}" ;;
+        esac
+    done
+    plan_output="$(mktemp "${TMPDIR:-/tmp}/machstrap-ssh-plan.XXXXXX")"
+    plan_error="$(mktemp "${TMPDIR:-/tmp}/machstrap-ssh-plan-error.XXXXXX")"
+    chmod 600 "$plan_output" "$plan_error"
+    set +e
+    ssh -G "${ssh_arguments[@]}" "$endpoint" >"$plan_output" 2>"$plan_error"
+    ssh_status=$?
+    set -e
+    if (( ssh_status != 0 )); then
+        err "OpenSSH could not resolve connection settings for: $endpoint"
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && warn "OpenSSH: $line"
+        done <"$plan_error"
+        rm -f -- "$plan_output" "$plan_error"
+        return 1
+    fi
+    while IFS= read -r line; do
+        effective_lines+=("$line")
+        key="${line%% *}"
+        value="${line#* }"
+        case "$key" in
+            hostname) effective_host="$value" ;;
+            user) effective_user="$value" ;;
+            port) effective_port="$value" ;;
+            stricthostkeychecking) strict="$value" ;;
+            hostkeyalias) host_key_alias="$value" ;;
+            userknownhostsfile) known_hosts="$value" ;;
+            globalknownhostsfile) global_known_hosts="$value" ;;
+        esac
+    done <"$plan_output"
+    rm -f -- "$plan_output" "$plan_error"
+    if [[ -z "$effective_host" || -z "$effective_user" || -z "$effective_port" ]]; then
+        err "OpenSSH returned an incomplete connection plan for: $endpoint"
+        [[ -n "$effective_host" ]] || warn "OpenSSH did not provide HostName"
+        [[ -n "$effective_user" ]] || warn "OpenSSH did not provide User"
+        [[ -n "$effective_port" ]] || warn "OpenSSH did not provide Port"
+        return 1
+    fi
+
+    if [[ "$show" == true ]]; then
+        printf 'SSH CONNECTION PLAN\n'
+        printf '  Inventory host: %s\n' "$inventory_host"
+        printf '  Endpoint:       %s\n' "$effective_host"
+        printf '  User:           %s\n' "$effective_user"
+        printf '  Port:           %s\n' "$effective_port"
+        printf '  SSH config:     %s\n' "${ssh_config:-${inventory_config:-OpenSSH defaults}}"
+        for line in "${effective_lines[@]}"; do
+            case "$line" in
+                proxycommand\ *)
+                    printf '  proxycommand <configured; hidden from report>\n'
+                    ;;
+                identityfile\ *|proxyjump\ *|userknownhostsfile\ *|hostkeyalias\ *)
+                    printf '  %s\n' "$line"
+                    ;;
+            esac
+        done
+    fi
+
+    MACHSTRAP_SSH_PLAN_HOST="$effective_host"
+    MACHSTRAP_SSH_PLAN_PORT="$effective_port"
+    MACHSTRAP_SSH_PLAN_ALIAS="$host_key_alias"
+    MACHSTRAP_SSH_PLAN_STRICT="$strict"
+    MACHSTRAP_SSH_PLAN_KNOWN="$known_hosts $global_known_hosts"
+    MACHSTRAP_SSH_PLAN_TARGET="$endpoint"
+    MACHSTRAP_SSH_PLAN_ARGS=("${ssh_arguments[@]}")
+}
+
+ssh_host_key_known() {
+    local lookup="$MACHSTRAP_SSH_PLAN_HOST" file
+    local -a known_files
+    [[ -z "$MACHSTRAP_SSH_PLAN_ALIAS" || "$MACHSTRAP_SSH_PLAN_ALIAS" == none ]] ||
+        lookup="$MACHSTRAP_SSH_PLAN_ALIAS"
+    [[ "$MACHSTRAP_SSH_PLAN_PORT" == 22 ]] ||
+        lookup="[$lookup]:$MACHSTRAP_SSH_PLAN_PORT"
+    read -r -a known_files <<<"$MACHSTRAP_SSH_PLAN_KNOWN"
+    for file in "${known_files[@]}"; do
+        [[ -n "$file" && "$file" != none ]] || continue
+        [[ "$file" != "~/"* ]] || file="${HOME:?}/${file#\~/}"
+        ssh-keygen -F "$lookup" -f "$file" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+run_ssh_handshake() {
+    local explicit="$1"
+    if ssh_host_key_known && [[ "$explicit" != true ]]; then
+        return 0
+    fi
+    if [[ "$explicit" != true ]]; then
+        case "$MACHSTRAP_SSH_PLAN_STRICT" in
+            no|off|false|accept-new) return 0 ;;
+        esac
+    fi
+    if ! interactive_terminal_available; then
+        [[ "$explicit" != true ]] || {
+            err "interactive SSH handshake requires a usable interactive terminal and /dev/tty"
+            return 2
+        }
+        return 0
+    fi
+    info "checking the SSH handshake for $MACHSTRAP_SSH_PLAN_TARGET"
+    set +e
+    ssh "${MACHSTRAP_SSH_PLAN_ARGS[@]}" \
+        -o NumberOfPasswordPrompts=0 \
+        "$MACHSTRAP_SSH_PLAN_TARGET" true </dev/tty >/dev/tty 2>/dev/tty
+    local ssh_status=$?
+    set -e
+    if (( ssh_status != 0 )) && ! ssh_host_key_known; then
+        err "SSH handshake failed before the host key was trusted"
+        return "$ssh_status"
+    fi
+    return 0
+}
+
 run_ansible() {
     local action="$1" profile="$2"
     shift 2
     local target_mode="" inventory="" limit="" all=false host="" user="" port="" identity="" ssh_config=""
-    local check=false diff=false ask_become=false ask_vault=false vault_file="" tags="" skip_tags="" verbosity=""
-    local -a command
-    local target_description mode started ansible_status
+    local check=false diff=false ask_pass=false ask_become=false ask_vault=false vault_file=""
+    local interactive=false prompt_available=false ssh_plan=false ssh_preflight=false
+    local tags="" skip_tags="" verbosity=""
+    local inventory_host="" ssh_endpoint="" ssh_user="" ssh_port="" ssh_identity="" need_ssh=false
+    local ssh_unresolved=""
+    local -a command ssh_record ssh_inventory_args
+    local target_description mode started ansible_status line record_index
+    ssh_inventory_args=()
 
     while (( $# )); do
         case "$1" in
@@ -1598,8 +2002,12 @@ run_ansible() {
             --ssh-config) [[ $# -ge 2 ]] || { err "--ssh-config requires a path"; return 2; }; ssh_config="$2"; shift 2 ;;
             --dry-run|--check) check=true; shift ;;
             --diff) diff=true; shift ;;
-            --ask-become-pass|-K) ask_become=true; shift ;;
+            --ask-pass|-k) ask_pass=true; shift ;;
+            --ask-sudo-pass|--ask-become-pass|-K) ask_become=true; shift ;;
             --ask-vault-pass) ask_vault=true; shift ;;
+            --interactive|--forward-all) interactive=true; shift ;;
+            --ssh-plan) ssh_plan=true; shift ;;
+            --ssh-preflight) ssh_preflight=true; shift ;;
             --vault-password-file) [[ $# -ge 2 ]] || { err "--vault-password-file requires a path"; return 2; }; vault_file="$2"; shift 2 ;;
             --tags) [[ $# -ge 2 ]] || { err "--tags requires a value"; return 2; }; tags="$2"; shift 2 ;;
             --skip-tags) [[ $# -ge 2 ]] || { err "--skip-tags requires a value"; return 2; }; skip_tags="$2"; shift 2 ;;
@@ -1609,14 +2017,40 @@ run_ansible() {
     done
 
     [[ -n "$target_mode" ]] || { err "choose --local, --inventory, or --host"; return 2; }
+    if [[ "$interactive" == true ]]; then
+        interactive_terminal_available || {
+            err "--interactive requires a usable interactive terminal, including readable and writable /dev/tty"
+            return 2
+        }
+        ask_pass=true
+        ask_become=true
+        [[ -n "$vault_file" ]] || ask_vault=true
+    fi
+    if [[ "$ssh_preflight" == true ]]; then
+        interactive_terminal_available || {
+            err "--ssh-preflight requires a usable interactive terminal, including readable and writable /dev/tty"
+            return 2
+        }
+    fi
+    if [[ "$action" == apply && "$check" != true ]] && interactive_terminal_available; then
+        prompt_available=true
+    fi
     [[ "$all" != true || "$target_mode" == inventory ]] || { err "--all requires --inventory"; return 2; }
     [[ -z "$limit" || "$target_mode" == inventory ]] || { err "--limit requires --inventory"; return 2; }
     if [[ "$target_mode" == inventory && -z "$limit" && "$all" != true ]]; then
         err "inventory runs require --limit or explicit --all"
         return 2
     fi
-    if [[ -z "$host" && ( -n "$user" || -n "$port" || -n "$identity" || -n "$ssh_config" ) ]]; then
-        err "SSH options require --host"
+    if [[ -z "$host" && ( -n "$user" || -n "$port" || -n "$identity" ) ]]; then
+        err "SSH endpoint options require --host"
+        return 2
+    fi
+    if [[ -n "$ssh_config" && "$target_mode" == local ]]; then
+        err "--ssh-config requires --inventory or --host"
+        return 2
+    fi
+    if [[ "$target_mode" == local && ( "$ssh_plan" == true || "$ssh_preflight" == true || "$interactive" == true || "$ask_pass" == true ) ]]; then
+        err "SSH interaction options require --inventory or --host"
         return 2
     fi
     if [[ -n "$user" && ! "$user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
@@ -1644,6 +2078,15 @@ run_ansible() {
     else
         command+=("$RUNTIME_ROOT/playbooks/site.yml")
     fi
+    if [[ -n "$ssh_config" ]]; then
+        ssh_config="$(canonical_file "$ssh_config")" || { err "SSH config not found: $ssh_config"; return 1; }
+        contains_control_characters "$ssh_config" && { err "SSH config path contains control characters"; return 2; }
+        [[ "$ssh_config" != *"'"* ]] || { err "SSH config path may not contain a single quote"; return 2; }
+        export ANSIBLE_SSH_ARGS="-F '$ssh_config'"
+    fi
+    if [[ -n "$vault_file" ]]; then
+        vault_file="$(canonical_file "$vault_file")" || { err "vault password file not found: $vault_file"; return 1; }
+    fi
 
     case "$target_mode" in
         local)
@@ -1668,12 +2111,6 @@ run_ansible() {
                     identity="$(canonical_file "$identity")" || { err "identity not found: $identity"; return 1; }
                     command+=(--private-key "$identity" --extra-vars "ansible_ssh_private_key_file=$identity")
                 fi
-                if [[ -n "$ssh_config" ]]; then
-                    ssh_config="$(canonical_file "$ssh_config")" || { err "SSH config not found: $ssh_config"; return 1; }
-                    contains_control_characters "$ssh_config" && { err "SSH config path contains control characters"; return 2; }
-                    [[ "$ssh_config" != *"'"* ]] || { err "SSH config path may not contain a single quote"; return 2; }
-                    export ANSIBLE_SSH_ARGS="-F '$ssh_config'"
-                fi
                 target_description="$target_description via $host"
                 [[ -z "$user" ]] || target_description="$target_description as $user"
                 [[ -z "$port" ]] || target_description="$target_description:$port"
@@ -1693,26 +2130,88 @@ run_ansible() {
                 identity="$(canonical_file "$identity")" || { err "identity not found: $identity"; return 1; }
                 command+=(--private-key "$identity")
             fi
-            if [[ -n "$ssh_config" ]]; then
-                ssh_config="$(canonical_file "$ssh_config")" || { err "SSH config not found: $ssh_config"; return 1; }
-                contains_control_characters "$ssh_config" && { err "SSH config path contains control characters"; return 2; }
-                [[ "$ssh_config" != *"'"* ]] || { err "SSH config path may not contain a single quote"; return 2; }
-                export ANSIBLE_SSH_ARGS="-F '$ssh_config'"
-            fi
             target_description="$host"
             [[ -z "$user" ]] || target_description="$user@$target_description"
             [[ -z "$port" ]] || target_description="$target_description:$port"
             ;;
     esac
 
+    if [[ "$target_mode" != local ]]; then
+        if [[ "$ssh_plan" == true || "$ssh_preflight" == true || "$interactive" == true ]]; then
+            need_ssh=true
+        elif [[ "$action" == apply ]] && interactive_terminal_available; then
+            need_ssh=true
+        fi
+    fi
+    if [[ "$need_ssh" == true ]]; then
+        if [[ "$target_mode" == host ]]; then
+            inventory_host="$host"
+            ssh_endpoint="$host"
+            ssh_user="$user"
+            ssh_port="$port"
+            ssh_identity="$identity"
+        else
+            ssh_record=()
+            while IFS= read -r line; do
+                ssh_record+=("$line")
+            done < <(inventory_ssh_record "$inventory" "${limit:-all}" "$vault_file" "$ask_vault")
+            if [[ "${#ssh_record[@]}" -lt 6 || "${ssh_record[${#ssh_record[@]}-1]:-}" != MACHSTRAP_SSH_RECORD ]]; then
+                if [[ "$ssh_plan" == true || "$ssh_preflight" == true || "$interactive" == true ]]; then
+                    err "SSH interaction requires an inventory selection resolving to exactly one host"
+                    return 2
+                fi
+                need_ssh=false
+            else
+                inventory_host="${ssh_record[0]}"
+                ssh_endpoint="${ssh_record[1]}"
+                ssh_user="${ssh_record[2]}"
+                ssh_port="${ssh_record[3]}"
+                ssh_identity="${ssh_record[4]}"
+                for (( record_index=5; record_index<${#ssh_record[@]}-1; record_index++ )); do
+                    case "${ssh_record[$record_index]}" in
+                        ARG:*) ssh_inventory_args+=("${ssh_record[$record_index]#ARG:}") ;;
+                        UNRESOLVED:*) ssh_unresolved="${ssh_record[$record_index]#UNRESOLVED:}" ;;
+                        *)
+                            err "inventory SSH arguments could not be parsed safely"
+                            return 2
+                            ;;
+                    esac
+                done
+                if [[ -n "$host" ]]; then
+                    ssh_endpoint="$host"
+                    [[ -z "$user" ]] || ssh_user="$user"
+                    [[ -z "$port" ]] || ssh_port="$port"
+                    [[ -z "$identity" ]] || ssh_identity="$identity"
+                fi
+                if [[ -n "$ssh_unresolved" ]]; then
+                    if [[ "$ssh_plan" == true || "$ssh_preflight" == true || "$interactive" == true ]]; then
+                        err "cannot resolve $ssh_unresolved for $inventory_host: the value still contains a Jinja expression"
+                        err "use concrete inventory SSH arguments or pass the OpenSSH file with --ssh-config"
+                        return 2
+                    fi
+                    warn "skipping automatic SSH handshake for $inventory_host: $ssh_unresolved requires Ansible templating"
+                    need_ssh=false
+                fi
+            fi
+        fi
+    fi
+    if [[ "$need_ssh" == true ]]; then
+        resolved_ssh_plan \
+            "$inventory_host" "$ssh_endpoint" "$ssh_user" "$ssh_port" \
+            "$ssh_identity" "$ssh_config" "$ssh_plan" || return 2
+        [[ "$ssh_plan" != true ]] || return 0
+        run_ssh_handshake "$ssh_preflight" || return $?
+        [[ "$ssh_preflight" != true ]] || return 0
+    fi
+
     [[ "$check" == true ]] && command+=(--check)
     [[ "$diff" == true ]] && command+=(--diff)
+    command+=(--extra-vars "machstrap_interactive=$interactive")
+    command+=(--extra-vars "machstrap_prompt_available=$prompt_available")
+    [[ "$ask_pass" == true ]] && command+=(--ask-pass)
     [[ "$ask_become" == true ]] && command+=(--ask-become-pass)
     [[ "$ask_vault" == true ]] && command+=(--ask-vault-pass)
-    if [[ -n "$vault_file" ]]; then
-        vault_file="$(canonical_file "$vault_file")" || { err "vault password file not found: $vault_file"; return 1; }
-        command+=(--vault-password-file "$vault_file")
-    fi
+    [[ -z "$vault_file" ]] || command+=(--vault-password-file "$vault_file")
     [[ -n "$tags" ]] && command+=(--tags "$tags")
     [[ -n "$skip_tags" ]] && command+=(--skip-tags "$skip_tags")
     [[ -n "$verbosity" ]] && command+=("$verbosity")

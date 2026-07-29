@@ -11,6 +11,16 @@
       user_dir: /tmp/machstrap-validation-home
       system: Validation
   tasks:
+    - name: Reject inventory-wide privilege escalation
+      ansible.builtin.assert:
+        that: ansible_become is not defined
+        fail_msg: >-
+          Do not set ansible_become in inventory. Machstrap escalates only the
+          individual system tasks that require it; inventory-wide become would
+          redirect user files, repositories, SSH keys, and facts to the
+          privileged account. Remove ansible_become and rerun.
+      tags: [always]
+
     - name: Require exactly one selected host for a transient endpoint override
       ansible.builtin.assert:
         that: ansible_play_hosts_all | length == 1

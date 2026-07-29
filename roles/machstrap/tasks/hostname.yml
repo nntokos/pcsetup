@@ -1,11 +1,50 @@
 ---
-- name: Set Linux hostname
-  ansible.builtin.hostname:
-    name: "{{ machstrap.hostname.hostname | default(machstrap.hostname.local_hostname) }}"
-  become: true
+- name: Resolve the desired Linux hostname
+  ansible.builtin.set_fact:
+    machstrap_linux_hostname: >-
+      {{
+        machstrap.hostname.hostname
+        | default(machstrap.hostname.local_hostname)
+      }}
   when:
     - machstrap_is_linux
     - machstrap.hostname.hostname is defined or machstrap.hostname.local_hostname is defined
+
+- name: Keep the Debian local hostname mapping synchronized
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1(?:\s+|$)'
+    line: >-
+      127.0.1.1 {{ machstrap_linux_hostname }}{{
+        (' ' ~ machstrap_linux_hostname.split('.')[0])
+        if '.' in machstrap_linux_hostname else ''
+      }}
+    insertafter: '^127\.0\.0\.1(?:\s+|$)'
+    state: present
+  become: true
+  when:
+    - machstrap_is_linux
+    - ansible_facts.os_family == 'Debian'
+    - machstrap_linux_hostname is defined
+
+- name: Set Linux hostname
+  ansible.builtin.hostname:
+    name: "{{ machstrap_linux_hostname }}"
+  become: true
+  when:
+    - machstrap_is_linux
+    - machstrap_linux_hostname is defined
+
+- name: Verify the Debian hostname resolves locally
+  ansible.builtin.command:
+    argv: [getent, hosts, "{{ machstrap_linux_hostname }}"]
+  changed_when: false
+  become: true
+  when:
+    - machstrap_is_linux
+    - ansible_facts.os_family == 'Debian'
+    - machstrap_linux_hostname is defined
+    - not ansible_check_mode
 
 - name: Read current macOS machine names
   ansible.builtin.command:

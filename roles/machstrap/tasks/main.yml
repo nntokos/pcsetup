@@ -1,4 +1,12 @@
 ---
+- name: Prepare the GitHub client identity
+  ansible.builtin.import_tasks: github-ssh.yml
+  tags: [git, ssh]
+
+- name: Verify Git repository access
+  ansible.builtin.import_tasks: git-preflight.yml
+  tags: [git]
+
 - name: Configure hostname
   ansible.builtin.import_tasks: hostname.yml
   tags: [hostname]

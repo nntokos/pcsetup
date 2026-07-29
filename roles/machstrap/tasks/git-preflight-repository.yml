@@ -1,0 +1,324 @@
+---
+- name: Identify GitHub SSH repositories
+  ansible.builtin.set_fact:
+    machstrap_git_is_github_ssh: >-
+      {{
+        machstrap_git_repository.repo
+        is match('^(git@github[.]com:|ssh://git@github[.]com/)')
+      }}
+    machstrap_git_can_prompt: >-
+      {{
+        (
+          machstrap_prompt_available | default(false) | bool
+          or machstrap_interactive | default(false) | bool
+        )
+        and ansible_play_hosts_all | length == 1
+      }}
+
+- name: Ensure the target SSH directory exists for GitHub host trust
+  ansible.builtin.file:
+    path: "{{ machstrap_home }}/.ssh"
+    state: directory
+    mode: "0700"
+  when: machstrap_git_is_github_ssh
+
+- name: Check for an existing target known_hosts file
+  ansible.builtin.stat:
+    path: "{{ machstrap_home }}/.ssh/known_hosts"
+  register: machstrap_git_known_hosts_stat
+  when: machstrap_git_is_github_ssh
+
+- name: Read existing GitHub host keys
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -F
+      - github.com
+      - -f
+      - "{{ machstrap_home }}/.ssh/known_hosts"
+  register: machstrap_git_existing_github_host_keys
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when:
+    - machstrap_git_is_github_ssh
+    - machstrap_git_known_hosts_stat.stat.exists
+
+- name: Determine whether GitHub's pinned host key is already trusted
+  ansible.builtin.set_fact:
+    machstrap_git_github_host_key_trusted: >-
+      {{
+        'AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
+        in machstrap_git_existing_github_host_keys.stdout | default('')
+      }}
+  when: machstrap_git_is_github_ssh
+
+- name: Wait for GitHub SSH host-key confirmation
+  ansible.builtin.pause:
+    prompt: |-
+      ACTION REQUIRED: {{ inventory_hostname }} has not trusted github.com for SSH.
+
+        GitHub Ed25519 fingerprint:
+          SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+
+      This fingerprint is pinned from GitHub's published documentation, not
+      learned from the current network connection. Compare it with GitHub's
+      published fingerprints before accepting it:
+      https://docs.github.com/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+
+      Answering no stops the run without changing {{ inventory_hostname }}.
+
+      Trust this GitHub SSH host key on {{ inventory_hostname }} [yes/no]
+    echo: true
+  register: machstrap_git_github_host_key_choice
+  when:
+    - machstrap_git_is_github_ssh
+    - not machstrap_git_github_host_key_trusted
+    - machstrap_git_can_prompt
+
+- name: Require explicit GitHub SSH host-key confirmation
+  ansible.builtin.assert:
+    that:
+      - >-
+        machstrap_git_github_host_key_trusted
+        or (
+          machstrap_git_can_prompt
+          and machstrap_git_github_host_key_choice.user_input | default('') | trim | lower
+          in ['yes', 'y']
+        )
+    fail_msg: >-
+      GitHub SSH host-key confirmation is required for {{ inventory_hostname }}.
+      Run a real single-host apply from a usable terminal and verify GitHub's
+      published Ed25519 fingerprint before accepting it:
+      SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+  when: machstrap_git_is_github_ssh
+
+# This is GitHub's published Ed25519 host key, not a value learned from the
+# network. Keep it synchronized with:
+# https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+- name: Trust GitHub's published Ed25519 host key
+  ansible.builtin.known_hosts:
+    path: "{{ machstrap_home }}/.ssh/known_hosts"
+    name: github.com
+    key: >-
+      github.com ssh-ed25519
+      AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+    hash_host: true
+    state: present
+  when:
+    - machstrap_git_is_github_ssh
+    - not machstrap_git_github_host_key_trusted
+
+- name: Check Git repository access
+  ansible.builtin.command:
+    argv:
+      - git
+      - ls-remote
+      - "{{ machstrap_git_repository.repo }}"
+      - HEAD
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+    GIT_SSH_COMMAND: ssh -o BatchMode=yes
+  register: machstrap_git_access_initial
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Identify whether GitHub key registration can repair access
+  ansible.builtin.set_fact:
+    machstrap_git_github_ssh_repairable: >-
+      {{
+        machstrap_git_access_initial.rc != 0
+        and machstrap.github_ssh.enabled | default(false) | bool
+        and machstrap_github_public_key_stat.stat.exists | default(false)
+        and (
+          machstrap_git_is_github_ssh
+        )
+      }}
+
+- name: Check the controller GitHub account
+  ansible.builtin.command:
+    argv: [gh, api, user, --jq, .login]
+  delegate_to: localhost
+  become: false
+  register: machstrap_github_cli_account
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when:
+    - machstrap_git_github_ssh_repairable
+    - machstrap_git_can_prompt
+
+- name: Wait for the GitHub access decision
+  ansible.builtin.pause:
+    prompt: |-
+      ACTION REQUIRED: GitHub denied access to {{ machstrap_git_repository.repo }}
+
+        Target key: {{ machstrap_github_public_key_fingerprint.stdout }}
+
+      {% if machstrap_github_cli_account.rc | default(1) == 0 -%}
+      The key above has no GitHub access yet, so the upload cannot run on the
+      target. Ansible delegates it to localhost: the controller you are running
+      machstrap on calls `gh ssh-key add` over HTTPS with the GitHub CLI
+      credentials stored there.
+
+        Uploaded from:  {{ lookup('ansible.builtin.pipe', 'hostname') }} (localhost, this controller)
+        Uploaded to:    @{{ machstrap_github_cli_account.stdout | trim }} (GitHub CLI account on this controller)
+        Key title:      machstrap {{ inventory_hostname }} {{ machstrap_github_public_key_fingerprint.stdout.split()[1] }}
+
+      Only the public key is copied to the controller, and it is deleted when
+      the upload finishes. Choose upload only if that GitHub account is the
+      right one, manual to register the key yourself in a browser, or abort to
+      stop without changing GitHub.
+      {%- else -%}
+      The key above has no GitHub access yet, so an upload cannot run on the
+      target. Ansible would delegate it to localhost: the controller you are
+      running machstrap on would call `gh ssh-key add` with its own GitHub CLI
+      credentials. Upload is NOT offered because `gh api user` failed there.
+
+        Controller:  {{ lookup('ansible.builtin.pipe', 'hostname') }} (localhost)
+        Reason:      the GitHub CLI is missing or not authenticated
+        To enable:   install the GitHub CLI, run `gh auth login` on that
+                     controller, then rerun this apply
+
+      Choose manual to register the key yourself in a browser, or abort to stop
+      without changing GitHub.
+      {%- endif %}
+
+      GitHub action [{{ 'upload/' if machstrap_github_cli_account.rc | default(1) == 0 else '' }}manual/abort]
+    echo: true
+  register: machstrap_github_key_choice
+  when:
+    - machstrap_git_github_ssh_repairable
+    - machstrap_git_can_prompt
+
+- name: Validate the GitHub SSH remediation choice
+  ansible.builtin.assert:
+    that:
+      - >-
+        machstrap_github_key_choice.user_input | default('') | trim | lower
+        in (
+          ['manual', 'abort']
+          + (
+            ['upload']
+            if machstrap_github_cli_account.rc | default(1) == 0
+            else []
+          )
+        )
+    fail_msg: GitHub SSH remediation was cancelled because the response was not recognized.
+  when:
+    - machstrap_git_github_ssh_repairable
+    - machstrap_git_can_prompt
+
+- name: Display manual GitHub key registration instructions
+  ansible.builtin.debug:
+    msg:
+      - "Open https://github.com/settings/ssh/new"
+      - "Target key: {{ machstrap_github_public_key_fingerprint.stdout }}"
+      - "{{ machstrap_github_public_key.content | b64decode | trim }}"
+      - "Return to this terminal after GitHub has accepted the key."
+  when:
+    - machstrap_git_github_ssh_repairable
+    - machstrap_git_can_prompt
+    - machstrap_github_key_choice.user_input | default('') | trim | lower == 'manual'
+
+- name: Wait for manual GitHub key registration
+  ansible.builtin.pause:
+    prompt: "Press Enter after registering the displayed public key, or Ctrl-C then A to abort"
+    echo: true
+  when:
+    - machstrap_git_github_ssh_repairable
+    - machstrap_git_can_prompt
+    - machstrap_github_key_choice.user_input | default('') | trim | lower == 'manual'
+
+- name: Upload the target SSH key to the confirmed GitHub account
+  when:
+    - machstrap_git_github_ssh_repairable
+    - machstrap_git_can_prompt
+    - machstrap_github_key_choice.user_input | default('') | trim | lower == 'upload'
+  block:
+    - name: Create a temporary public-key file on the controller
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .pub
+      delegate_to: localhost
+      become: false
+      register: machstrap_github_upload_key_file
+      changed_when: false
+
+    - name: Stage the public key for GitHub CLI
+      ansible.builtin.copy:
+        content: "{{ machstrap_github_public_key.content | b64decode | trim }}\n"
+        dest: "{{ machstrap_github_upload_key_file.path }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+    - name: Add the target SSH key to the GitHub account
+      ansible.builtin.command:
+        argv:
+          - gh
+          - ssh-key
+          - add
+          - "{{ machstrap_github_upload_key_file.path }}"
+          - --type
+          - authentication
+          - --title
+          - "machstrap {{ inventory_hostname }} {{ machstrap_github_public_key_fingerprint.stdout.split()[1] }}"
+      delegate_to: localhost
+      become: false
+      register: machstrap_github_key_upload
+      changed_when: machstrap_github_key_upload.rc == 0
+  always:
+    - name: Remove the staged public key from the controller
+      ansible.builtin.file:
+        path: "{{ machstrap_github_upload_key_file.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      when: machstrap_github_upload_key_file.path is defined
+
+- name: Retry Git repository access after GitHub remediation
+  ansible.builtin.command:
+    argv:
+      - git
+      - ls-remote
+      - "{{ machstrap_git_repository.repo }}"
+      - HEAD
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+    GIT_SSH_COMMAND: ssh -o BatchMode=yes
+  register: machstrap_git_access_retry
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when:
+    - machstrap_git_github_ssh_repairable
+    - machstrap_git_can_prompt
+    - machstrap_github_key_choice.user_input | default('') | trim | lower in ['upload', 'manual']
+
+- name: Require access to the Git repository
+  ansible.builtin.assert:
+    that:
+      - >-
+        machstrap_git_access_initial.rc == 0
+        or machstrap_git_access_retry.rc | default(1) == 0
+    fail_msg: |-
+      Git access preflight failed for {{ machstrap_git_repository.repo }}.
+      {{ machstrap_git_access_retry.stderr | default(machstrap_git_access_initial.stderr, true) | trim }}
+      {% if machstrap_git_github_ssh_repairable %}
+      Register this target key at https://github.com/settings/ssh/new:
+      {{ machstrap_github_public_key.content | b64decode | trim }}
+      Re-run a real apply for one host from a usable terminal to upload through
+      an authenticated GitHub CLI account or pause while you register it
+      manually. `--interactive` is only needed when forwarding all credential
+      prompts is also desired.
+      {% elif machstrap_git_repository.repo is match('^https://github[.]com/') %}
+      This is an HTTPS URL; adding an SSH key will not authorize it. Configure
+      HTTPS credentials or change the repository URL to GitHub SSH.
+      {% else %}
+      Verify the repository URL, requested account access, host key, and target
+      Git/SSH credential configuration.
+      {% endif %}

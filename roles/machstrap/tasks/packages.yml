@@ -12,7 +12,10 @@
 
 - name: Check installed Snap packages
   ansible.builtin.command:
-    argv: [snap, list, "{{ item.name }}"]
+    argv:
+      - snap
+      - list
+      - "{{ item if item is string else item.name }}"
   loop: "{{ machstrap.packages.snap }}"
   register: machstrap_snap_status
   failed_when: false
@@ -22,7 +25,22 @@
 
 - name: Install missing Snap packages
   ansible.builtin.command:
-    argv: "{{ ['snap', 'install', '--channel', item.item.channel] + (['--classic'] if item.item.classic else []) + [item.item.name] }}"
+    argv: >-
+      {{
+        ['snap', 'install', '--channel',
+         (item.item.channel | default('stable'))
+         if item.item is mapping else 'stable']
+        + (
+          ['--classic']
+          if (
+            (item.item.classic | default(false) | bool)
+            if item.item is mapping else false
+          )
+          else []
+        )
+        + [item.item if item.item is string else item.item.name]
+      }}
+  become: true
   loop: "{{ machstrap_snap_status.results | default([]) }}"
   when:
     - machstrap_is_linux

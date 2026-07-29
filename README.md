@@ -174,7 +174,103 @@ machstrap apply linux-server \
 ```
 
 OpenSSH configuration is honored normally. `--ssh-config PATH` selects a
-non-default OpenSSH configuration file. Host-key checking stays enabled.
+non-default OpenSSH configuration file for either an inventory or ad-hoc host
+run. Host-key checking stays enabled:
+
+```bash
+machstrap apply linux-server \
+  --inventory inventories/my-site/hosts.yml \
+  --limit server-01 \
+  --ssh-config ~/.ssh/site_config
+```
+
+Ansible runs non-interactively, so it cannot answer OpenSSH's first-connection
+host-key prompt itself. For a single-host `apply` launched from a real terminal,
+Machstrap checks the resolved OpenSSH connection first and forwards the native
+fingerprint question when the key is not yet trusted. The automatic handshake
+is skipped when stdin, stdout, or stderr is not a usable terminal, so CI and
+redirected runs never block waiting for input. Verify every new fingerprint
+through a trusted channel before accepting it. If a machine was rebuilt,
+replace only that host's stale entry after verifying the replacement.
+Machstrap does not disable host-key checking or accept keys automatically.
+
+Inspect the combined inventory and OpenSSH result without connecting:
+
+```bash
+machstrap apply linux-server \
+  --inventory inventories/my-site/hosts.yml \
+  --limit server-01 \
+  --ssh-config ~/.ssh/site_config \
+  --ssh-plan
+```
+
+`--ssh-preflight` performs the interactive handshake and exits without running
+the playbook. `--ask-pass` forwards Ansible's SSH connection-password prompt.
+Machstrap keeps the SSH login user for dotfiles, repositories, SSH keys, and
+other user state, and applies `sudo` only to individual system tasks such as
+package installation and hostname changes. Do not set `ansible_become` in
+inventory: Ansible gives that connection variable higher precedence than task
+keywords, which would also redirect user-scoped work to the privileged account.
+Use `--ask-sudo-pass` (the clearer alias for Ansible's
+`--ask-become-pass`/`-K`) when sudo requires a password. Passwordless sudo needs
+no option. A real apply verifies sudo access before making selected system
+changes and reports the login-user boundary separately.
+`--interactive` (also available as `--forward-all`) requires a usable terminal,
+checks the handshake, and enables SSH, become, and Vault password prompts.
+Interactive SSH planning and preflight require a selection that resolves to
+exactly one inventory host.
+
+## Git repository access preflight
+
+Before hostname, package, or other role changes, `apply` checks every configured
+`git_repos` and `dotfiles_repo` URL from the target with `git ls-remote`. Git
+credential prompts are disabled during this probe, so an inaccessible private
+repository fails early instead of hanging during cloning.
+
+For an SSH URL on `github.com` with `github_ssh.enabled: true`, Machstrap
+first displays GitHub's pinned, published Ed25519 fingerprint and requires
+confirmation before adding that key to the target's `known_hosts`; it never
+trusts a key learned from the current network connection. Machstrap then
+generates the configured target client key before the probe. A real single-host
+apply from a usable terminal can either upload the public key—after explicit
+confirmation—to the GitHub account already authenticated through `gh` on the
+controller, or pause while the user registers it manually. Redirected, CI,
+dry-run, and multi-host executions remain non-prompting and fail with
+fingerprint instructions on first use.
+
+### Where the key upload runs
+
+The upload cannot run on the target: the key being registered is precisely the
+key that has no GitHub access yet. Machstrap therefore delegates the upload to
+`localhost`—the controller running `machstrap`—where `gh ssh-key add` reaches
+`api.github.com` over HTTPS using the GitHub CLI credentials already stored
+there. Two separate credentials are involved: the target's SSH key is the
+subject of the change, and the controller's `gh` token is the authority making
+it.
+
+This means the controller must be prepared for the `upload` choice:
+
+```bash
+gh auth login          # on the machine running machstrap, not the target
+gh api user --jq .login # confirm the account that will receive the key
+```
+
+Machstrap runs that same `gh api user` check before prompting. When the GitHub
+CLI is missing or unauthenticated on the controller, `upload` is not offered at
+all; the prompt says so, names the controller, and leaves `manual` and `abort`.
+When it is authenticated, the prompt names the exact account the key will be
+added to, so a controller logged into the wrong GitHub account is visible
+before anything changes. Only the public key is copied to the controller, into
+a temporary file that is removed in an `always` block; the private key never
+leaves the target. Ansible's own output marks the delegation as
+`[target -> localhost]`.
+
+Existing SSH keypairs are reused rather than regenerated. If an existing
+private key is missing only its public file, Machstrap reconstructs that public
+file without replacing the private key; an orphan public key causes a safe
+failure. Repository access must succeed on retry before the run continues.
+HTTPS repository failures require HTTPS credentials or a deliberate switch to
+an SSH URL; adding an SSH key cannot authorize an HTTPS clone.
 
 ### Transient endpoint overrides
 

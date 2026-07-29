@@ -1,0 +1,141 @@
+---
+- name: Ensure the GitHub client SSH directory exists
+  ansible.builtin.file:
+    path: "{{ machstrap_home }}/.ssh"
+    state: directory
+    mode: "0700"
+  when: machstrap.github_ssh.enabled | default(false)
+
+- name: Check for an existing GitHub SSH private key
+  ansible.builtin.stat:
+    path: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+  register: machstrap_github_private_key_stat
+  when: machstrap.github_ssh.enabled | default(false)
+
+- name: Check for an existing GitHub SSH public key
+  ansible.builtin.stat:
+    path: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub"
+  register: machstrap_github_public_key_initial_stat
+  when: machstrap.github_ssh.enabled | default(false)
+
+- name: Refuse to replace an orphaned GitHub public key
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (
+          machstrap_github_public_key_initial_stat.stat.exists
+          and not machstrap_github_private_key_stat.stat.exists
+        )
+    fail_msg: >-
+      Found a GitHub SSH public key without its private key at
+      {{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub.
+      Machstrap will not overwrite or replace existing SSH key material.
+  when: machstrap.github_ssh.enabled | default(false)
+
+- name: Generate a GitHub SSH key if requested
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -t
+      - "{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+      - -C
+      - "{{ machstrap.github_ssh.email | default(ansible_facts['user_id'] + '@machstrap', true) }}"
+      - -f
+      - "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+      - -N
+      - ""
+    creates: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - not machstrap_github_private_key_stat.stat.exists
+    - not machstrap_github_public_key_initial_stat.stat.exists
+
+- name: Recover a missing public key from the existing private key
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -y
+      - -P
+      - ""
+      - -f
+      - "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}"
+  register: machstrap_github_recovered_public_key
+  failed_when: false
+  changed_when: false
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_private_key_stat.stat.exists
+    - not machstrap_github_public_key_initial_stat.stat.exists
+
+- name: Require a readable existing GitHub private key
+  ansible.builtin.assert:
+    that:
+      - machstrap_github_recovered_public_key.rc == 0
+      - >-
+        machstrap_github_recovered_public_key.stdout
+        is match('^(ssh-[^ ]+|ecdsa-[^ ]+) [A-Za-z0-9+/=]+(?: .*)?$')
+    fail_msg: >-
+      The existing GitHub SSH private key could not be used to reconstruct its
+      missing public key. Machstrap left the private key unchanged; restore its
+      matching .pub file manually.
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_private_key_stat.stat.exists
+    - not machstrap_github_public_key_initial_stat.stat.exists
+
+- name: Restore the missing GitHub public key
+  ansible.builtin.copy:
+    content: "{{ machstrap_github_recovered_public_key.stdout }}\n"
+    dest: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub"
+    mode: "0644"
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_private_key_stat.stat.exists
+    - not machstrap_github_public_key_initial_stat.stat.exists
+    - machstrap_github_recovered_public_key.rc == 0
+
+- name: Check whether the GitHub public key exists
+  ansible.builtin.stat:
+    path: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub"
+  register: machstrap_github_public_key_stat
+  when: machstrap.github_ssh.enabled | default(false)
+
+- name: Read the GitHub public key
+  ansible.builtin.slurp:
+    src: "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub"
+  register: machstrap_github_public_key
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_public_key_stat.stat.exists
+
+- name: Read the GitHub public key fingerprint
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -lf
+      - "{{ machstrap_home }}/.ssh/id_{{ machstrap.github_ssh.key_type | default('ed25519') }}.pub"
+  register: machstrap_github_public_key_fingerprint
+  changed_when: false
+  check_mode: false
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_public_key_stat.stat.exists
+
+- name: Show the GitHub public key registration details
+  ansible.builtin.debug:
+    msg:
+      - "Register this SSH key with GitHub at https://github.com/settings/ssh/new"
+      - "{{ machstrap_github_public_key_fingerprint.stdout }}"
+      - "{{ machstrap_github_public_key.content | b64decode | trim }}"
+  tags: [machstrap_notice]
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - machstrap_github_public_key_stat.stat.exists
+
+- name: Explain GitHub key output during check mode
+  ansible.builtin.debug:
+    msg: The GitHub public key will be generated and access-tested during the first real apply.
+  tags: [machstrap_notice]
+  when:
+    - machstrap.github_ssh.enabled | default(false)
+    - not machstrap_github_public_key_stat.stat.exists

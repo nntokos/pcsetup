@@ -19,6 +19,17 @@
       - wireguard
       - plex
 
+- name: Validate inline dotfiles collection type
+  ansible.builtin.assert:
+    that:
+      - machstrap.dotfiles is sequence
+      - machstrap.dotfiles is not string
+      - machstrap.dotfiles is not mapping
+    fail_msg: >-
+      Invalid machstrap.dotfiles value from
+      {{ machstrap_dotfiles_source | default('an unknown configuration source') }}:
+      expected a YAML list of inline dotfile operations.
+
 - name: Validate top-level configuration shape
   ansible.builtin.assert:
     that:
@@ -28,7 +39,6 @@
       - machstrap.packages is mapping
       - machstrap.git_config is mapping
       - machstrap.git_repos is sequence
-      - machstrap.dotfiles is sequence
       - machstrap.dotfile_sources is sequence
       - machstrap.folder_sources is sequence
       - machstrap.dotfiles_repo is mapping
@@ -53,6 +63,36 @@
       - machstrap.packages.pip | default([]) is sequence and machstrap.packages.pip | default([]) is not string
     fail_msg: Package providers must be apt, snap, brew, cask, or pip lists.
 
+- name: Validate Snap package entry types
+  ansible.builtin.assert:
+    that:
+      - item is string or item is mapping
+    fail_msg: Snap packages must be package-name strings or mappings.
+  loop: "{{ machstrap.packages.snap }}"
+
+- name: Validate Snap package name shorthands
+  ansible.builtin.assert:
+    that:
+      - item | length > 0
+    fail_msg: Snap package names must not be empty.
+  loop: "{{ machstrap.packages.snap | select('string') | list }}"
+
+- name: Validate detailed Snap package declarations
+  ansible.builtin.assert:
+    that:
+      - item.keys() | difference(['name', 'channel', 'classic']) | length == 0
+      - item.name | default('') is string
+      - item.name | default('') | length > 0
+      - item.channel | default('stable') is string
+      - item.channel | default('stable') | length > 0
+      - (item.classic | default(false)) is boolean
+    fail_msg: >-
+      Detailed Snap packages require a non-empty name; channel and classic are
+      optional and default to stable and false.
+  loop: "{{ machstrap.packages.snap | select('mapping') | list }}"
+  loop_control:
+    label: "{{ item.name | default('invalid Snap package') }}"
+
 - name: Validate hostname keys
   ansible.builtin.assert:
     that: machstrap.hostname.keys() | difference(['computer_name', 'local_hostname', 'hostname']) | length == 0
@@ -70,7 +110,10 @@
       - item.block | default('') | length > 0
       - item.lines | default([]) is sequence
       - item.lines | default([]) is not string
-    fail_msg: Each dotfile operation needs path, mode, stable block, and lines.
+    fail_msg: >-
+      Invalid dotfile operation from
+      {{ machstrap_dotfiles_source | default('an unknown configuration source') }}:
+      each operation needs path, mode, stable block, and lines.
   loop: "{{ machstrap.dotfiles }}"
   loop_control:
     label: "{{ item.path | default('invalid dotfile') }}"
@@ -141,6 +184,17 @@
     fail_msg: >-
       SSH ports must be valid. Enabling SSH with password authentication
       disabled also requires at least one authorized key.
+
+- name: Validate GitHub client SSH settings
+  ansible.builtin.assert:
+    that:
+      - machstrap.github_ssh.keys() | difference(['enabled', 'email', 'key_type']) | length == 0
+      - (machstrap.github_ssh.enabled | default(false)) is boolean
+      - machstrap.github_ssh.email | default('') is string
+      - machstrap.github_ssh.key_type | default('ed25519') in ['ed25519', 'rsa', 'ecdsa']
+    fail_msg: >-
+      GitHub client SSH settings support enabled, email, and an ed25519, rsa,
+      or ecdsa key_type.
 
 - name: Validate guarded static-network settings
   ansible.builtin.assert:

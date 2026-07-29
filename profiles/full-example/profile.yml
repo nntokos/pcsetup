@@ -10,10 +10,18 @@
 #   ./machstrap apply ~/machine-configs/my-machine --local --check --diff
 #
 # A profile contains desired machine state only. SSH connection data belongs
-# in inventory; secrets belong in an encrypted Ansible Vault file.
+# in inventory; secrets belong in an encrypted Ansible Vault file. Inventory
+# SSH arguments may use Ansible's `inventory_dir` or `inventory_file` path
+# tokens; Machstrap resolves those two tokens when building an SSH plan.
+# Never set `ansible_become` in inventory. Machstrap grants privilege only to
+# individual system tasks so user files and repositories stay in the login
+# user's home directory. Use the `--ask-sudo-pass` command option when those
+# system tasks require a sudo password; passwordless sudo needs no option.
 machstrap_profile:
-  # Names are explicit so the same profile is predictable on Linux and macOS.
-  # On Linux, `hostname` is used. macOS can apply all three names.
+  # Keep this empty in reusable profiles and set a unique name in inventory.
+  # On Debian/Ubuntu, Machstrap updates the 127.0.1.1 mapping before changing
+  # the hostname so later sudo tasks do not stall on local name resolution.
+  # Other Linux systems use `hostname`; macOS can apply all three names.
   hostname: {}
     # computer_name: My Computer
     # local_hostname: my-computer
@@ -28,8 +36,12 @@ machstrap_profile:
     brew: []
     cask: []
     pip: []
-    # snap entries:
-    #   - name: code
+    # A string installs the stable, non-classic Snap:
+    #   - hello-world
+    # Use a mapping only when overriding optional Snap controls:
+    # `classic: true` is always explicit; Machstrap never grants classic
+    # confinement automatically or retries a failed strict install with it.
+    #   - name: go
     #     channel: stable
     #     classic: true
 
@@ -46,7 +58,10 @@ machstrap_profile:
     #   branch: main
     #   depth: 1
 
-  # Inline file operations. Each block ID must remain stable across edits.
+  # Inline file operations must be a YAML list, even when there is only one.
+  # Do not use paths as mapping keys. Validation identifies this profile file
+  # and operation line when an item is invalid. Each block ID must remain
+  # stable across edits.
   dotfiles: []
     # - path: ~/.zshrc
     #   mode: append       # append, prepend, or replace
@@ -76,8 +91,22 @@ machstrap_profile:
     # stow_packages: [shell, git]
     # script: ./install.sh
 
-  # Generate a client key for GitHub. The public key is displayed for manual
-  # registration; the private key never leaves the managed host.
+  # Generate a client key for GitHub; the private key never leaves the managed
+  # host. Before changing the machine, apply probes every configured git_repos
+  # and dotfiles_repo URL with target-side credentials and Git prompts disabled.
+  # For an explicit github.com SSH URL used for the first time, a real
+  # single-host apply displays GitHub's pinned, published Ed25519 fingerprint
+  # and requires confirmation before writing it to target known_hosts. It never
+  # trusts a key learned from the current network connection. If GitHub then
+  # denies repository access, the same run can upload the public key or pause
+  # while you register it manually. The upload cannot run on the target, whose
+  # key has no access yet: Ansible delegates it to localhost, where `gh
+  # ssh-key add` uses the controller's own authenticated GitHub CLI account.
+  # Run `gh auth login` on the controller to make that option available; the
+  # prompt names the account before anything is uploaded. Existing keypairs are
+  # always reused;
+  # Machstrap never replaces SSH key material. Access is retried before
+  # continuing.
   github_ssh:
     enabled: false
     email: ""

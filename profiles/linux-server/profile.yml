@@ -2,8 +2,8 @@
 # Safe Debian/Ubuntu server baseline. Add a real authorized key before enabling
 # the SSH server; profile validation rejects a keyless password-disabled setup.
 machstrap_profile:
-  hostname:
-    hostname: machstrap-linux-server
+  # Set a unique hostname in inventory rather than sharing one across servers.
+  hostname: {}
   packages:
     apt: [git, curl, ca-certificates, unattended-upgrades, ufw]
     snap: []

@@ -1,0 +1,26 @@
+---
+- name: Build the Git repository access-preflight list
+  ansible.builtin.set_fact:
+    machstrap_git_preflight_repositories: >-
+      {{
+        machstrap.git_repos
+        + (
+          [
+            {
+              'repo': machstrap.dotfiles_repo.repo,
+              'path': machstrap.dotfiles_repo.path | default('~/.dotfiles'),
+              'branch': machstrap.dotfiles_repo.branch | default('main')
+            }
+          ]
+          if machstrap.dotfiles_repo.repo is defined
+          else []
+        )
+      }}
+  changed_when: false
+
+- name: Preflight configured Git repositories
+  ansible.builtin.include_tasks: git-preflight-repository.yml
+  loop: "{{ machstrap_git_preflight_repositories }}"
+  loop_control:
+    loop_var: machstrap_git_repository
+    label: "{{ machstrap_git_repository.repo }}"
