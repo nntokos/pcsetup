@@ -1,0 +1,12 @@
+version: 2
+ethernets:
+  management:
+    match:
+      macaddress: "__MANAGEMENT_MAC__"
+    set-name: enp1s0
+    dhcp4: true
+  test:
+    match:
+      macaddress: "__TEST_MAC__"
+    set-name: enp2s0
+    dhcp4: true

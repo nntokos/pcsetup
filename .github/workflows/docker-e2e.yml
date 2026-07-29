@@ -1,0 +1,24 @@
+name: docker-e2e
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["22.04", "24.04"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install controller test dependencies
+        run: sudo apt-get update && sudo apt-get install -y ansible-core expect
+      - name: Run Docker SSH integration suite
+        run: ./tests/docker/run.sh "${{ matrix.ubuntu }}"

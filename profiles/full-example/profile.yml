@@ -13,10 +13,13 @@
 # in inventory; secrets belong in an encrypted Ansible Vault file. Inventory
 # SSH arguments may use Ansible's `inventory_dir` or `inventory_file` path
 # tokens; Machstrap resolves those two tokens when building an SSH plan.
-# Never set `ansible_become` in inventory. Machstrap grants privilege only to
-# individual system tasks so user files and repositories stay in the login
-# user's home directory. Use the `--ask-sudo-pass` command option when those
-# system tasks require a sudo password; passwordless sudo needs no option.
+# Never set `ansible_become` in an inventory file, `group_vars`, or `host_vars`;
+# Machstrap uses Ansible's PyYAML-capable Python runtime to reject it with an
+# exact source location before invoking a playbook. Validation fails closed if
+# that runtime cannot be resolved. Privilege is granted only to individual
+# system tasks so user files and repositories stay in the login user's home.
+# Use `--ask-sudo-pass` when those tasks need a sudo password; passwordless
+# sudo needs no option.
 machstrap_profile:
   # Keep this empty in reusable profiles and set a unique name in inventory.
   # On Debian/Ubuntu, Machstrap updates the 127.0.1.1 mapping before changing

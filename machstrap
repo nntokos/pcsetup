@@ -760,34 +760,82 @@ require_runtime() {
     }
 }
 
+python_supports_yaml() {
+    local interpreter="$1"
+    [[ -n "$interpreter" && -x "$interpreter" ]] || return 1
+    "$interpreter" -c 'import yaml' >/dev/null 2>&1
+}
+
 ansible_python_interpreter() {
-    local launcher shebang interpreter
+    local launcher shebang interpreter="" version_output local_temp
+    local remove_temp=false
     launcher="$(command -v ansible-playbook)"
     [[ -f "$launcher" && -r "$launcher" ]] || return 1
-    IFS= read -r shebang < "$launcher" || return 1
+    IFS= read -r shebang < "$launcher" || shebang=""
     if [[ "$shebang" =~ ^\#!(/[^[:space:]]+)$ ]]; then
         interpreter="${BASH_REMATCH[1]}"
-    elif [[ "$shebang" =~ ^\#!/usr/bin/env[[:space:]]+python3?$ ]]; then
-        interpreter="$(command -v python3)"
-    else
-        return 1
+    elif [[ "$shebang" =~ ^\#!/usr/bin/env[[:space:]]+(python3?)$ ]]; then
+        interpreter="$(command -v "${BASH_REMATCH[1]}" 2>/dev/null || true)"
     fi
-    [[ -x "$interpreter" ]] || return 1
-    printf '%s\n' "$interpreter"
+    if python_supports_yaml "$interpreter"; then
+        printf '%s\n' "$interpreter"
+        return 0
+    fi
+
+    if [[ -n "${ANSIBLE_LOCAL_TEMP:-}" ]]; then
+        local_temp="$ANSIBLE_LOCAL_TEMP"
+    else
+        local_temp="$(mktemp -d "${TMPDIR:-/tmp}/machstrap-python.XXXXXX")"
+        chmod 700 "$local_temp"
+        remove_temp=true
+    fi
+    version_output="$(
+        ANSIBLE_LOCAL_TEMP="$local_temp" ansible-playbook --version 2>/dev/null ||
+            true
+    )"
+    [[ "$remove_temp" == false ]] || rm -rf -- "$local_temp"
+    interpreter="$(
+        printf '%s\n' "$version_output" |
+            sed -n 's/^  python version = .* (\(\/[^()]*\))$/\1/p' |
+            head -n 1
+    )"
+    if python_supports_yaml "$interpreter"; then
+        printf '%s\n' "$interpreter"
+        return 0
+    fi
+
+    interpreter="$(command -v python3 2>/dev/null || true)"
+    if python_supports_yaml "$interpreter"; then
+        printf '%s\n' "$interpreter"
+        return 0
+    fi
+    interpreter="$(command -v python 2>/dev/null || true)"
+    if python_supports_yaml "$interpreter"; then
+        printf '%s\n' "$interpreter"
+        return 0
+    fi
+    return 1
 }
 
 validate_yaml_file() {
     local file="$1" label="$2" interpreter
-    interpreter="$(ansible_python_interpreter)" || return 0
+    interpreter="$(ansible_python_interpreter)" || {
+        err "could not locate the PyYAML-capable Python runtime used by Ansible"
+        return 2
+    }
     "$interpreter" - "$file" "$label" <<'PY'
 import sys
 
+path, label = sys.argv[1:]
 try:
     import yaml
 except ImportError:
-    raise SystemExit(0)
+    print(
+        "machstrap: error: Ansible's Python runtime does not provide PyYAML",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
-path, label = sys.argv[1:]
 try:
     with open(path, encoding="utf-8") as profile:
         document = yaml.compose(profile)
@@ -952,6 +1000,29 @@ def validate_override_nodes(node):
 
 
 validate_override_nodes(document)
+
+
+def reject_inventory_become(node):
+    if isinstance(node, yaml.MappingNode):
+        for key, value in node.value:
+            if (
+                isinstance(key, yaml.ScalarNode)
+                and key.value == "ansible_become"
+            ):
+                source_error(
+                    key,
+                    "inventory privilege escalation",
+                    "Do not set ansible_become in inventory; Machstrap "
+                    "elevates only individual system tasks",
+                )
+            reject_inventory_become(value)
+    elif isinstance(node, yaml.SequenceNode):
+        for value in node.value:
+            reject_inventory_become(value)
+
+
+if label != "profile":
+    reject_inventory_become(document)
 PY
 }
 
@@ -1852,7 +1923,9 @@ resolved_ssh_plan() {
     [[ -z "$user" ]] || ssh_arguments+=(-l "$user")
     [[ -z "$port" ]] || ssh_arguments+=(-p "$port")
     [[ -z "$identity" ]] || ssh_arguments+=(-i "$identity")
-    ssh_arguments+=("${ssh_inventory_args[@]}")
+    if (( ${#ssh_inventory_args[@]} )); then
+        ssh_arguments+=("${ssh_inventory_args[@]}")
+    fi
     for (( argument_index=0; argument_index<${#ssh_inventory_args[@]}; argument_index++ )); do
         case "${ssh_inventory_args[$argument_index]}" in
             -F)

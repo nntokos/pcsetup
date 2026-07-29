@@ -16,8 +16,16 @@ hook once per checkout:
 git config core.hooksPath .githooks
 ```
 
-The repository intentionally has no pre-push hook; tests run at pre-commit
-and in CI.
+The same hook configuration runs the fast suite plus both Ubuntu Docker
+matrices before each push. Run that gate directly with:
+
+```bash
+./tests/run-pre-push-tests.sh
+```
+
+The pre-push gate covers every push-triggered CI check. Privileged VM and
+external-service suites are local-only because they require dedicated VM
+capacity and sandbox credentials.
 
 Run a complete check-mode smoke test:
 

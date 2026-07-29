@@ -1,0 +1,4 @@
+---
+# The encrypted inventory replaces this empty command list.
+machstrap_profile:
+  commands: []

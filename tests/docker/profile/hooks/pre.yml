@@ -1,0 +1,6 @@
+---
+- name: Record the Docker pre-hook
+  ansible.builtin.copy:
+    dest: "{{ machstrap_home }}/.machstrap-pre-hook"
+    content: "pre-hook\n"
+    mode: "0600"

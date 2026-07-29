@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+repository=$(git rev-parse --show-toplevel)
+git_local_environment=$(git rev-parse --local-env-vars)
+unset $git_local_environment
+cd "$repository"
+
+printf '%s\n' "machstrap hook: running the local CI gate before push" >&2
+exec ./tests/run-pre-push-tests.sh

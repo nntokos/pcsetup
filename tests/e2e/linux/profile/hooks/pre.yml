@@ -1,0 +1,6 @@
+---
+- name: Record the Linux VM pre-hook
+  ansible.builtin.copy:
+    dest: "{{ machstrap_home }}/.machstrap-pre-hook"
+    content: "pre\n"
+    mode: "0600"

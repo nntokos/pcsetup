@@ -1,0 +1,106 @@
+---
+machstrap_profile:
+  hostname:
+    hostname: machstrap-e2e
+  packages:
+    apt: [ca-certificates, curl, git, stow, tree]
+    snap:
+      - hello-world
+      - name: go
+        channel: stable
+        classic: true
+    brew: []
+    cask: []
+    pip: [cowsay]
+  git_config:
+    user.name: Machstrap E2E
+    user.email: e2e@example.invalid
+    init.defaultBranch: main
+  git_repos:
+    - repo: file:///srv/fixture.git
+      path: ~/src/fixture
+      branch: main
+      depth: 1
+  dotfiles:
+    - path: ~/.machstrap-replace
+      mode: replace
+      block: replace
+      lines: [replace-line]
+    - path: ~/.machstrap-blocks
+      mode: prepend
+      block: prepend
+      lines: [prepend-line]
+    - path: ~/.machstrap-blocks
+      mode: append
+      block: append
+      lines: [append-line]
+  dotfile_sources:
+    - source: assets/copied.conf
+      destination: ~/.config/machstrap/copied.conf
+      mode: "0600"
+  folder_sources:
+    - source: assets/folder
+      destination: ~/.config/machstrap-folder
+      directory_mode: "0700"
+  dotfiles_repo:
+    repo: file:///srv/fixture.git
+    path: ~/.dotfiles
+    branch: main
+    method: symlink
+  github_ssh:
+    enabled: true
+    email: e2e@example.invalid
+    key_type: ed25519
+  ssh:
+    enabled: true
+    authorized_keys:
+      - "{{ controller_public_key }}"
+    allow_password: false
+    port: 2222
+  macos:
+    defaults: []
+    restart: []
+  commands:
+    - command: "printf 'command\\n' > .machstrap-command"
+      chdir: "~"
+      creates: ~/.machstrap-command
+      no_log: false
+  static_network:
+    enabled: true
+    address: 192.168.77.10/24
+    only_on_subnet: 192.168.76.0/24
+    interface: enp2s0
+    gateway: 192.168.77.1
+    dns: [1.1.1.1]
+    apply: true
+  firewall:
+    configured: true
+    enabled: true
+    default_incoming: deny
+    default_outgoing: allow
+    rules:
+      - {port: 2222, protocol: tcp, from: 192.168.76.0/24, comment: E2E SSH}
+      - {port: 51820, protocol: udp, from: 192.168.77.0/24, comment: E2E WireGuard}
+      - {port: 80, protocol: tcp, from: 192.168.77.0/24, comment: E2E fixture service}
+  wireguard:
+    enabled: true
+    interface: wg0
+    address: 10.88.0.1/24
+    listen_port: 51820
+    private_key_path: /etc/wireguard/machstrap-e2e.key
+    outbound_interface: enp2s0
+    peers:
+      - name: probe
+        public_key: "{{ wireguard_peer_public_key }}"
+        allowed_ips: [10.88.0.2/32]
+  plex:
+    enabled: true
+    image: nginx:alpine
+    config_path: /srv/plex/config
+    transcode_path: /srv/plex/transcode
+    media_paths: [/srv/plex/media]
+    timezone: UTC
+    uid: 1000
+    gid: 1000
+    claim: e2e-not-a-real-secret
+    update_image: false

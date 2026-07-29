@@ -514,7 +514,7 @@ only when `VERSION` and the changelog agree.
 Security issues should be reported privately as described in
 [`SECURITY.md`](SECURITY.md).
 
-## Fast tests
+## Tests
 
 Run the fast, non-mutating suite with:
 
@@ -523,6 +523,12 @@ Run the fast, non-mutating suite with:
 ```
 
 The same suite runs on Linux and macOS for every public push and pull request.
+Docker SSH integration tests exercise ordinary-user ownership and all sudo
+password modes on Ubuntu 22.04 and 24.04. Local-only disposable QEMU/libvirt
+and Tart VM suites cover systemd, Snap, sshd, networking, firewall, WireGuard,
+Plex, Homebrew, macOS settings, dry-run safety, privilege auditing, and
+idempotency. See [`tests/README.md`](tests/README.md) for local commands,
+host requirements, and the free-tier CI boundary.
 
 ## Existing configurations
 

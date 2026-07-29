@@ -1,0 +1,37 @@
+#!/usr/bin/expect -f
+
+if {$argc < 1} {
+    puts stderr "usage: github-canary-run.exp COMMAND \[ARG ...\]"
+    exit 2
+}
+
+set timeout 1800
+set answered_host_key 0
+set answered_upload 0
+spawn -noecho {*}$argv
+expect {
+    -glob "*Trust this GitHub SSH host key on *\\\[yes/no\\\]" {
+        send -- "yes\r"
+        set answered_host_key 1
+        exp_continue
+    }
+    -glob "*GitHub action \\\[*manual/abort\\\]" {
+        send -- "upload\r"
+        set answered_upload 1
+        exp_continue
+    }
+    timeout {
+        puts stderr "GitHub canary interaction timed out"
+        catch {close}
+        catch {wait}
+        exit 124
+    }
+    eof
+}
+
+set child_status [wait]
+if {!$answered_host_key || !$answered_upload} {
+    puts stderr "GitHub canary did not observe both expected confirmation prompts"
+    exit 2
+}
+exit [lindex $child_status 3]
